@@ -7,19 +7,21 @@ import java.util.Locale
 import java.util.UUID
 
 const val DEFAULT_AI_SYSTEM_PROMPT =
-    "Ты — Volt AI, локальный ИИ-ассистент, встроенный в Volt Messenger. Ты работаешь офлайн прямо на устройстве пользователя. Никогда не называй себя ChatGPT или моделью OpenAI. Отвечай на русском языке, кратко, по делу и дружелюбно."
+    "Ты — Volt AI, встроенный локальный ассистент мессенджера Volt Messenger. Ты работаешь офлайн прямо на телефоне пользователя. Никогда не называй себя ChatGPT или OpenAI. Отвечай на русском языке, кратко и по делу."
 
 enum class ChatType {
     SAVED,
     AI,
     LOCAL_LAN,
-    GROUP_LAN
+    GROUP_LAN,
+    CHANNEL_LAN
 }
 
 enum class ChatFolder(val title: String) {
     ALL("Все"),
     LOCAL("Локальные"),
     GROUPS("Группы"),
+    CHANNELS("Каналы"),
     AI("ИИ")
 }
 
@@ -27,9 +29,19 @@ enum class ChatFolder(val title: String) {
 data class AppThemeConfig(
     val themeMode: Int = 0, // 0 = Системная, 1 = Светлая, 2 = Тёмная
     val accentPreset: Int = 0, // 0 = Material You, 1 = Индиго, 2 = Изумруд, 3 = Аметист, 4 = Закат
-    val bubbleRadius: Int = 20, // 10..26 dp
-    val wallpaperStyle: Int = 1, // 0 = Чистый, 1 = Мягкий градиент, 2 = Точечная сетка
-    val aiSystemPrompt: String = DEFAULT_AI_SYSTEM_PROMPT
+    val bubbleRadius: Int = 20,
+    val wallpaperStyle: Int = 1, // 0 = Чистый, 1 = Градиент, 2 = Сетка
+    val aiSystemPrompt: String = DEFAULT_AI_SYSTEM_PROMPT,
+    val aiControlEnabled: Boolean = true,
+    val relayEnabled: Boolean = false,
+    val relayUrl: String = ""
+)
+
+@Immutable
+data class ChannelMeta(
+    val id: String,
+    val title: String,
+    val ownerId: String
 )
 
 @Immutable
@@ -87,7 +99,9 @@ data class ChatMessage(
     val attachment: AttachmentInfo? = null,
     val transferProgress: Float? = null,
     val transferSpeedMbps: Float? = null,
-    val isEncrypted: Boolean = false
+    val isEncrypted: Boolean = false,
+    val reactions: Map<String, Int> = emptyMap(),
+    val myReactions: Set<String> = emptySet()
 ) {
     companion object {
         private val timeFormat = ThreadLocal.withInitial {
@@ -112,7 +126,8 @@ data class ChatRoom(
     val avatarColorIndex: Int = 0,
     val peerHost: String? = null,
     val peerPort: Int? = null,
-    val serverName: String? = null
+    val serverName: String? = null,
+    val isChannelOwner: Boolean = true
 )
 
 @Immutable

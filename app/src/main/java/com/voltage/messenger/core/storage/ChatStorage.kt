@@ -10,6 +10,7 @@ import android.provider.OpenableColumns
 import com.voltage.messenger.core.crypto.VoltCrypto
 import com.voltage.messenger.model.AppThemeConfig
 import com.voltage.messenger.model.AttachmentInfo
+import com.voltage.messenger.model.ChannelMeta
 import com.voltage.messenger.model.ChatMessage
 import com.voltage.messenger.model.DEFAULT_AI_SYSTEM_PROMPT
 import com.voltage.messenger.model.ReplyPreview
@@ -23,9 +24,11 @@ import java.util.UUID
 
 class ChatStorage(private val context: Context) {
     private val prefs = context.getSharedPreferences("volt_messenger_prefs", Context.MODE_PRIVATE)
-    private val messagesFile = File(context.filesDir, "messages_v3.json")
+    private val messagesFile = File(context.filesDir, "messages_v4.json")
     private val peersFile = File(context.filesDir, "known_peers_v1.json")
     private val groupsFile = File(context.filesDir, "known_groups_v1.json")
+    private val channelsFile = File(context.filesDir, "known_channels_v1.json")
+    private val pinsFile = File(context.filesDir, "pins_v1.json")
     val attachmentsDir = File(context.filesDir, "attachments").apply { mkdirs() }
 
     fun getDeviceId(): String {
@@ -35,6 +38,8 @@ class ChatStorage(private val context: Context) {
         prefs.edit().putString("device_id", created).apply()
         return created
     }
+
+    fun getShortId(): String = getDeviceId().take(6)
 
     fun getNickname(): String {
         return prefs.getString("nickname", null)
@@ -64,7 +69,10 @@ class ChatStorage(private val context: Context) {
             accentPreset = prefs.getInt("accent_preset", 0),
             bubbleRadius = prefs.getInt("bubble_radius", 20),
             wallpaperStyle = prefs.getInt("wallpaper_style", 1),
-            aiSystemPrompt = prefs.getString("ai_system_prompt", DEFAULT_AI_SYSTEM_PROMPT) ?: DEFAULT_AI_SYSTEM_PROMPT
+            aiSystemPrompt = prefs.getString("ai_system_prompt", DEFAULT_AI_SYSTEM_PROMPT) ?: DEFAULT_AI_SYSTEM_PROMPT,
+            aiControlEnabled = prefs.getBoolean("ai_control_enabled", true),
+            relayEnabled = prefs.getBoolean("relay_enabled", false),
+            relayUrl = prefs.getString("relay_url", "") ?: ""
         )
     }
 
@@ -75,6 +83,9 @@ class ChatStorage(private val context: Context) {
             .putInt("bubble_radius", cfg.bubbleRadius)
             .putInt("wallpaper_style", cfg.wallpaperStyle)
             .putString("ai_system_prompt", cfg.aiSystemPrompt)
+            .putBoolean("ai_control_enabled", cfg.aiControlEnabled)
+            .putBoolean("relay_enabled", cfg.relayEnabled)
+            .putString("relay_url", cfg.relayUrl)
             .apply()
     }
 
@@ -100,13 +111,7 @@ class ChatStorage(private val context: Context) {
                 }
             }
             val mime = cr.getType(uri) ?: "application/octet-stream"
-            AttachmentInfo(
-                name = displayName,
-                localPath = "",
-                mimeType = mime,
-                sizeBytes = sizeBytes,
-                uriString = uri.toString()
-            )
+            AttachmentInfo(displayName, "", mime, sizeBytes, uriString = uri.toString())
         } catch (_: Exception) {
             null
         }
@@ -129,7 +134,6 @@ class ChatStorage(private val context: Context) {
         return File(attachmentsDir, safe)
     }
 
-    // Модели .gguf сохраняются прямо в Загрузки/VoltModels (папка Volt AI), остальные — в Загрузки/VoltMessenger
     fun exportToPublicDownloads(sourceFile: File, displayName: String, mimeType: String) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
         val folder = if (displayName.endsWith(".gguf", ignoreCase = true)) {
@@ -157,8 +161,7 @@ class ChatStorage(private val context: Context) {
             val root = if (peersFile.exists()) JSONObject(peersFile.readText()) else JSONObject()
             root.put(peerId, JSONObject().put("nick", nickname).put("srv", serverName))
             peersFile.writeText(root.toString())
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 
     fun loadKnownPeers(): Map<String, Pair<String, String>> {
@@ -172,8 +175,7 @@ class ChatStorage(private val context: Context) {
                 val o = root.optJSONObject(id) ?: continue
                 result[id] = o.optString("nick", id) to o.optString("srv", "Volt-Node")
             }
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
         return result
     }
 
@@ -182,8 +184,7 @@ class ChatStorage(private val context: Context) {
             val root = if (groupsFile.exists()) JSONObject(groupsFile.readText()) else JSONObject()
             root.put(groupId, groupName)
             groupsFile.writeText(root.toString())
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 
     fun loadKnownGroups(): Map<String, String> {
@@ -196,9 +197,68 @@ class ChatStorage(private val context: Context) {
                 val id = keys.next()
                 result[id] = root.optString(id, "Локальная группа")
             }
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
         return result
+    }
+
+    fun saveChannel(meta: ChannelMeta) {
+        try {
+            val root = if (channelsFile.exists()) JSONObject(channelsFile.readText()) else JSONObject()
+            root.put(meta.id, JSONObject().put("title", meta.title).put("ownerId", meta.ownerId))
+            channelsFile.writeText(root.toString())
+        } catch (_: Exception) {}
+    }
+
+    fun loadChannels(): Map<String, ChannelMeta> {
+        val result = mutableMapOf<String, ChannelMeta>()
+        if (!channelsFile.exists()) return result
+        try {
+            val root = JSONObject(channelsFile.readText())
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val id = keys.next()
+                val o = root.optJSONObject(id) ?: continue
+                result[id] = ChannelMeta(id, o.optString("title", "Канал"), o.optString("ownerId", ""))
+            }
+        } catch (_: Exception) {}
+        return result
+    }
+
+    fun savePins(pinnedChats: Set<String>, pinnedMessages: Map<String, String>) {
+        try {
+            val root = JSONObject()
+            val chatsArr = JSONArray()
+            pinnedChats.forEach { chatsArr.put(it) }
+            val msgsObj = JSONObject()
+            pinnedMessages.forEach { (k, v) -> msgsObj.put(k, v) }
+            root.put("chats", chatsArr)
+            root.put("messages", msgsObj)
+            pinsFile.writeText(root.toString())
+        } catch (_: Exception) {}
+    }
+
+    fun loadPins(): Pair<Set<String>, Map<String, String>> {
+        if (!pinsFile.exists()) return emptySet<String>() to emptyMap()
+        return try {
+            val root = JSONObject(pinsFile.readText())
+            val chats = mutableSetOf<String>()
+            val cArr = root.optJSONArray("chats")
+            if (cArr != null) {
+                for (i in 0 until cArr.length()) chats.add(cArr.optString(i))
+            }
+            val msgs = mutableMapOf<String, String>()
+            val mObj = root.optJSONObject("messages")
+            if (mObj != null) {
+                val keys = mObj.keys()
+                while (keys.hasNext()) {
+                    val k = keys.next()
+                    msgs[k] = mObj.optString(k)
+                }
+            }
+            chats to msgs
+        } catch (_: Exception) {
+            emptySet<String>() to emptyMap()
+        }
     }
 
     fun loadMessages(): MutableMap<String, MutableList<ChatMessage>> {
@@ -214,9 +274,7 @@ class ChatStorage(private val context: Context) {
                 for (i in 0 until arr.length()) {
                     val o = arr.optJSONObject(i) ?: continue
                     val replyObj = o.optJSONObject("replyTo")
-                    val reply = if (replyObj != null) {
-                        ReplyPreview(replyObj.optString("senderName"), replyObj.optString("text"))
-                    } else null
+                    val reply = if (replyObj != null) ReplyPreview(replyObj.optString("senderName"), replyObj.optString("text")) else null
 
                     val attObj = o.optJSONObject("attachment")
                     val att = if (attObj != null) {
@@ -229,6 +287,23 @@ class ChatStorage(private val context: Context) {
                             durationSec = attObj.optInt("durationSec", 0)
                         )
                     } else null
+
+                    val reactionsMap = mutableMapOf<String, Int>()
+                    o.optJSONObject("reactions")?.let { rObj ->
+                        val rk = rObj.keys()
+                        while (rk.hasNext()) {
+                            val e = rk.next()
+                            val cnt = rObj.optInt(e, 0)
+                            if (cnt > 0) reactionsMap[e] = cnt
+                        }
+                    }
+
+                    val myReactionsSet = mutableSetOf<String>()
+                    o.optJSONArray("myReactions")?.let { mArr ->
+                        for (j in 0 until mArr.length()) {
+                            myReactionsSet.add(mArr.optString(j))
+                        }
+                    }
 
                     val ts = o.optLong("timestamp", System.currentTimeMillis())
                     list.add(
@@ -244,14 +319,15 @@ class ChatStorage(private val context: Context) {
                             isMediaDemo = o.optBoolean("isMediaDemo", false),
                             replyTo = reply,
                             attachment = att,
-                            isEncrypted = o.optBoolean("isEncrypted", false)
+                            isEncrypted = o.optBoolean("isEncrypted", false),
+                            reactions = reactionsMap,
+                            myReactions = myReactionsSet
                         )
                     )
                 }
                 result[chatId] = list
             }
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
         return result
     }
 
@@ -285,12 +361,21 @@ class ChatStorage(private val context: Context) {
                                 .put("durationSec", msg.attachment.durationSec)
                         )
                     }
+                    if (msg.reactions.isNotEmpty()) {
+                        val rObj = JSONObject()
+                        msg.reactions.forEach { (e, c) -> if (c > 0) rObj.put(e, c) }
+                        o.put("reactions", rObj)
+                    }
+                    if (msg.myReactions.isNotEmpty()) {
+                        val mArr = JSONArray()
+                        msg.myReactions.forEach { mArr.put(it) }
+                        o.put("myReactions", mArr)
+                    }
                     arr.put(o)
                 }
                 root.put(chatId, arr)
             }
             messagesFile.writeText(root.toString())
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 }

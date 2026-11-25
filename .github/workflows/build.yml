@@ -38,6 +38,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: Volt Messenger v0.5.${{ github.run_number }}
+          name: Volt Messenger v0.6.${{ github.run_number }}
           body: Автоматическая сборка Volt Messenger (build ${{ github.run_number }})
           files: app/build/outputs/apk/release/app-release.apk
