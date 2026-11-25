@@ -2,99 +2,48 @@ package com.voltage.messenger
 
 import android.os.Bundle
 import androidx.activity.ComponentActivity
+import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
-import androidx.compose.animation.animateColorAsState
-import androidx.compose.animation.core.Spring
-import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
-import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
-import androidx.compose.animation.scaleIn
-import androidx.compose.animation.scaleOut
-import androidx.compose.animation.shrinkVertically
+import androidx.compose.animation.slideInHorizontally
+import androidx.compose.animation.slideOutHorizontally
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.background
-import androidx.compose.foundation.layout.Arrangement
-import androidx.compose.foundation.layout.Box
-import androidx.compose.foundation.layout.Column
-import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
-import androidx.compose.foundation.layout.Spacer
-import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
-import androidx.compose.foundation.layout.height
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.navigationBarsPadding
-import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.statusBarsPadding
-import androidx.compose.foundation.layout.width
-import androidx.compose.foundation.layout.widthIn
-import androidx.compose.foundation.lazy.LazyColumn
-import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.rememberLazyListState
-import androidx.compose.foundation.shape.CircleShape
-import androidx.compose.foundation.shape.RoundedCornerShape
-import androidx.compose.foundation.text.BasicTextField
-import androidx.compose.material.icons.Icons
-import androidx.compose.material.icons.automirrored.rounded.Send
-import androidx.compose.material.icons.rounded.AutoAwesome
-import androidx.compose.material.icons.rounded.Mic
-import androidx.compose.material.icons.rounded.OpenInNew
-import androidx.compose.material.icons.rounded.Pause
-import androidx.compose.material.icons.rounded.PlayArrow
-import androidx.compose.material.icons.rounded.Refresh
-import androidx.compose.material.icons.rounded.Stop
-import androidx.compose.material3.FilledTonalButton
-import androidx.compose.material3.FilledTonalIconButton
-import androidx.compose.material3.Icon
-import androidx.compose.material3.IconButton
-import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.Scaffold
-import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
-import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableFloatStateOf
-import androidx.compose.runtime.mutableStateListOf
+import androidx.compose.runtime.mutableStateMapOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
-import androidx.compose.ui.Alignment
-import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
-import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
-import androidx.compose.ui.text.font.FontWeight
-import androidx.compose.ui.unit.dp
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import com.voltage.messenger.core.ai.AiChatMessage
 import com.voltage.messenger.core.ai.VoltAiClient
 import com.voltage.messenger.core.ai.VoltAiStatus
-import com.voltage.messenger.ui.components.WavySeekBar
-import com.voltage.messenger.ui.theme.AppSurface
+import com.voltage.messenger.core.network.LanMessenger
+import com.voltage.messenger.core.storage.ChatStorage
+import com.voltage.messenger.model.ChatMessage
+import com.voltage.messenger.model.ChatRoom
+import com.voltage.messenger.model.ChatType
+import com.voltage.messenger.model.ReplyPreview
+import com.voltage.messenger.ui.screens.ChatListScreen
+import com.voltage.messenger.ui.screens.ChatScreen
 import com.voltage.messenger.ui.theme.VoltMessengerTheme
 import kotlinx.coroutines.Job
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.catch
 import kotlinx.coroutines.launch
 import java.util.UUID
 
-data class ChatUiMessage(
-    val id: String = UUID.randomUUID().toString(),
-    val text: String,
-    val isFromUser: Boolean,
-    val isMediaDemo: Boolean = false
-)
+private const val CHAT_ID_SAVED = "saved_messages"
+private const val CHAT_ID_AI = "volt_ai_local"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -102,480 +51,333 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         setContent {
             VoltMessengerTheme {
-                VoltChatScreen()
+                VoltMessengerApp()
             }
         }
     }
 }
 
 @Composable
-fun VoltChatScreen() {
+fun VoltMessengerApp() {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
-    val listState = rememberLazyListState()
 
+    val storage = remember { ChatStorage(context) }
+    var nickname by remember { mutableStateOf(storage.getNickname()) }
+    val fingerprint = remember { storage.getKeyFingerprintEmojis() }
+
+    var activeChatId by remember { mutableStateOf<String?>(null) }
     var aiStatus by remember { mutableStateOf(VoltAiStatus.CHECKING) }
-    var inputText by remember { mutableStateOf("") }
-    var isGenerating by remember { mutableStateOf(false) }
-    var activeJob by remember { mutableStateOf<Job?>(null) }
+    var isAiGenerating by remember { mutableStateOf(false) }
+    var aiJob by remember { mutableStateOf<Job?>(null) }
 
-    val messages = remember {
-        mutableStateListOf(
-            ChatUiMessage(
-                text = "Привет! Я подключён напрямую к твоему локальному серверу Volt AI (127.0.0.1:8080).",
-                isFromUser = false
-            ),
-            ChatUiMessage(
-                text = "Демо-плеер Material You • 0:24",
-                isFromUser = false,
-                isMediaDemo = true
-            )
+    val unreadCounts = remember { mutableStateMapOf<String, Int>() }
+    val messagesByChat = remember {
+        mutableStateMapOf<String, List<ChatMessage>>().apply {
+            val saved = storage.loadMessages()
+            saved.forEach { (k, v) -> put(k, v) }
+            if (get(CHAT_ID_SAVED).isNullOrEmpty()) {
+                put(
+                    CHAT_ID_SAVED,
+                    listOf(
+                        ChatMessage(
+                            chatId = CHAT_ID_SAVED,
+                            senderName = "Избранное",
+                            text = "Личное пространство для заметок, идей и пересылки сообщений.",
+                            isFromMe = false
+                        ),
+                        ChatMessage(
+                            chatId = CHAT_ID_SAVED,
+                            senderName = "Избранное",
+                            text = "Голосовое • 0:24",
+                            isFromMe = false,
+                            isMediaDemo = true
+                        )
+                    )
+                )
+            }
+            if (get(CHAT_ID_AI).isNullOrEmpty()) {
+                put(
+                    CHAT_ID_AI,
+                    listOf(
+                        ChatMessage(
+                            chatId = CHAT_ID_AI,
+                            senderName = "Volt AI",
+                            text = "Локальный ИИ готов. Можно писать сюда напрямую или пересылать сообщения из других чатов долгим нажатием.",
+                            isFromMe = false
+                        )
+                    )
+                )
+            }
+        }
+    }
+
+    fun persistAll() {
+        storage.saveMessages(messagesByChat.toMap())
+    }
+
+    fun appendMessage(chatId: String, msg: ChatMessage) {
+        val updated = (messagesByChat[chatId] ?: emptyList()) + msg
+        messagesByChat[chatId] = updated
+        if (activeChatId != chatId && !msg.isFromMe) {
+            unreadCounts[chatId] = (unreadCounts[chatId] ?: 0) + 1
+        }
+        persistAll()
+    }
+
+    fun updateMessageText(chatId: String, msgId: String, newText: String) {
+        val current = messagesByChat[chatId] ?: return
+        messagesByChat[chatId] = current.map {
+            if (it.id == msgId) it.copy(text = newText) else it
+        }
+    }
+
+    val lanMessenger = remember {
+        LanMessenger(
+            context = context,
+            myDeviceId = storage.getDeviceId(),
+            myNickname = nickname,
+            onMessageReceived = { incoming ->
+                scope.launch {
+                    val chatId = "lan_${incoming.peerId}"
+                    appendMessage(
+                        chatId,
+                        ChatMessage(
+                            chatId = chatId,
+                            senderName = incoming.senderName,
+                            text = incoming.text,
+                            isFromMe = false,
+                            timestamp = incoming.timestamp
+                        )
+                    )
+                }
+            }
         )
     }
 
-    fun refreshStatus(silent: Boolean = false) {
-        scope.launch {
-            if (!silent) aiStatus = VoltAiStatus.CHECKING
-            aiStatus = VoltAiClient.checkStatus(context)
-        }
+    val lanPeers by lanMessenger.peers.collectAsState()
+    val isLanActive by lanMessenger.isLanActive.collectAsState()
+
+    DisposableEffect(Unit) {
+        lanMessenger.start()
+        onDispose { lanMessenger.destroy() }
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
             if (event == Lifecycle.Event.ON_RESUME) {
-                refreshStatus(silent = aiStatus != VoltAiStatus.CHECKING)
+                scope.launch {
+                    aiStatus = VoltAiClient.checkStatus(context)
+                }
             }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    fun updateMessageText(id: String, text: String) {
-        val idx = messages.indexOfFirst { it.id == id }
-        if (idx >= 0) {
-            messages[idx] = messages[idx].copy(text = text)
+    val allChats = remember(lanPeers, unreadCounts.toMap(), aiStatus) {
+        buildList {
+            add(
+                ChatRoom(
+                    id = CHAT_ID_SAVED,
+                    title = "Избранное",
+                    subtitle = "Заметки на устройстве",
+                    type = ChatType.SAVED,
+                    isPinned = true,
+                    unreadCount = unreadCounts[CHAT_ID_SAVED] ?: 0,
+                    avatarColorIndex = 0
+                )
+            )
+            add(
+                ChatRoom(
+                    id = CHAT_ID_AI,
+                    title = "Volt AI",
+                    subtitle = "Локальная нейросеть",
+                    type = ChatType.AI,
+                    isOnline = aiStatus == VoltAiStatus.READY,
+                    isPinned = true,
+                    unreadCount = unreadCounts[CHAT_ID_AI] ?: 0,
+                    avatarColorIndex = 1
+                )
+            )
+            lanPeers.forEachIndexed { idx, peer ->
+                val cid = "lan_${peer.id}"
+                add(
+                    ChatRoom(
+                        id = cid,
+                        title = peer.name,
+                        subtitle = "Wi-Fi • ${peer.host}",
+                        type = ChatType.LOCAL_LAN,
+                        isOnline = true,
+                        unreadCount = unreadCounts[cid] ?: 0,
+                        avatarColorIndex = (idx + 2) % 3,
+                        peerHost = peer.host,
+                        peerPort = peer.port
+                    )
+                )
+            }
         }
     }
 
-    fun sendMessage() {
-        val prompt = inputText.trim()
-        if (prompt.isEmpty() || isGenerating) return
-
-        inputText = ""
-        messages.add(ChatUiMessage(text = prompt, isFromUser = true))
+    fun sendToAi(promptText: String, replyTo: ReplyPreview?) {
+        if (isAiGenerating) return
+        appendMessage(
+            CHAT_ID_AI,
+            ChatMessage(
+                chatId = CHAT_ID_AI,
+                senderName = nickname,
+                text = promptText,
+                isFromMe = true,
+                replyTo = replyTo
+            )
+        )
 
         val replyId = UUID.randomUUID().toString()
-        messages.add(ChatUiMessage(id = replyId, text = "Печатает...", isFromUser = false))
-        isGenerating = true
+        appendMessage(
+            CHAT_ID_AI,
+            ChatMessage(
+                id = replyId,
+                chatId = CHAT_ID_AI,
+                senderName = "Volt AI",
+                text = "Печатает...",
+                isFromMe = false
+            )
+        )
+        isAiGenerating = true
 
-        val history = messages
+        val history = (messagesByChat[CHAT_ID_AI] ?: emptyList())
             .filter { !it.isMediaDemo && it.id != replyId }
             .takeLast(12)
-            .map { AiChatMessage(if (it.isFromUser) "user" else "assistant", it.text) }
+            .map { AiChatMessage(if (it.isFromMe) "user" else "assistant", it.text) }
 
-        activeJob = scope.launch {
-            listState.animateScrollToItem(0)
+        aiJob = scope.launch {
             val buffer = StringBuilder()
             var lastUiUpdate = 0L
 
             VoltAiClient.streamCompletion(history)
-                .catch { e ->
-                    buffer.append("Нет связи с Volt AI (${e.message ?: "сервер выключен"}). Запусти сервер в Настройках Volt AI.")
-                    updateMessageText(replyId, buffer.toString())
+                .catch {
+                    buffer.append("Нет связи с сервером Volt AI (127.0.0.1:8080). Открой Volt AI и включи сервер.")
+                    updateMessageText(CHAT_ID_AI, replyId, buffer.toString())
                     aiStatus = VoltAiStatus.SERVER_OFFLINE
                 }
                 .collect { chunk ->
                     buffer.append(chunk)
                     val now = System.currentTimeMillis()
                     if (now - lastUiUpdate >= 35L) {
-                        updateMessageText(replyId, buffer.toString())
+                        updateMessageText(CHAT_ID_AI, replyId, buffer.toString())
                         lastUiUpdate = now
                     }
                 }
 
             if (buffer.isNotEmpty()) {
-                updateMessageText(replyId, buffer.toString())
+                updateMessageText(CHAT_ID_AI, replyId, buffer.toString())
             }
-            isGenerating = false
+            persistAll()
+            isAiGenerating = false
         }
     }
 
-    Scaffold(
-        modifier = Modifier
-            .fillMaxSize()
-            .imePadding(),
-        containerColor = MaterialTheme.colorScheme.surface,
-        topBar = {
-            ChatTopBar(
-                status = aiStatus,
-                onRefresh = { refreshStatus(silent = false) },
-                onOpenVoltAi = { VoltAiClient.launchVoltAi(context) }
-            )
+    val currentChat = allChats.firstOrNull { it.id == activeChatId }
+
+    BackHandler(enabled = currentChat != null) {
+        activeChatId = null
+    }
+
+    AnimatedContent(
+        targetState = currentChat,
+        transitionSpec = {
+            if (targetState != null) {
+                (slideInHorizontally(tween(240)) { it } + fadeIn(tween(180))) togetherWith
+                    (slideOutHorizontally(tween(240)) { -it / 4 } + fadeOut(tween(160)))
+            } else {
+                (slideInHorizontally(tween(240)) { -it / 4 } + fadeIn(tween(180))) togetherWith
+                    (slideOutHorizontally(tween(240)) { it } + fadeOut(tween(160)))
+            }
         },
-        bottomBar = {
-            ChatInputBar(
-                text = inputText,
-                isGenerating = isGenerating,
-                onTextChange = { inputText = it },
-                onSend = { sendMessage() },
-                onStop = {
-                    activeJob?.cancel()
-                    isGenerating = false
+        label = "screenNav"
+    ) { chat ->
+        if (chat == null) {
+            ChatListScreen(
+                chats = allChats,
+                messagesByChat = messagesByChat,
+                aiStatus = aiStatus,
+                isLanActive = isLanActive,
+                lanPeerCount = lanPeers.size,
+                nickname = nickname,
+                fingerprintEmojis = fingerprint,
+                onNicknameChange = { newName ->
+                    nickname = newName
+                    storage.setNickname(newName)
+                    lanMessenger.restartWithNickname(newName)
+                },
+                onChatClick = { clicked ->
+                    unreadCounts[clicked.id] = 0
+                    activeChatId = clicked.id
+                },
+                onOpenSavedClick = {
+                    unreadCounts[CHAT_ID_SAVED] = 0
+                    activeChatId = CHAT_ID_SAVED
                 }
             )
-        }
-    ) { innerPadding ->
-        Column(
-            modifier = Modifier
-                .fillMaxSize()
-                .padding(innerPadding)
-        ) {
-            AnimatedVisibility(
-                visible = aiStatus == VoltAiStatus.NOT_INSTALLED || aiStatus == VoltAiStatus.SERVER_OFFLINE,
-                enter = expandVertically(spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)) + fadeIn(tween(180)),
-                exit = shrinkVertically(spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)) + fadeOut(tween(150))
-            ) {
-                StatusBanner(
-                    status = aiStatus,
-                    onOpenVoltAi = { VoltAiClient.launchVoltAi(context) }
-                )
-            }
-
-            // reverseLayout = true: как в Telegram, растущий ответ ИИ плавно сдвигает ленту вверх без мерцания
-            LazyColumn(
-                state = listState,
-                reverseLayout = true,
-                modifier = Modifier.fillMaxSize(),
-                contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom)
-            ) {
-                items(messages.asReversed(), key = { it.id }) { msg ->
-                    Box(
-                        modifier = Modifier.animateItem(
-                            fadeInSpec = tween(durationMillis = 180),
-                            fadeOutSpec = tween(durationMillis = 140),
-                            placementSpec = spring(
-                                dampingRatio = Spring.DampingRatioNoBouncy,
-                                stiffness = Spring.StiffnessMedium
+        } else {
+            ChatScreen(
+                chat = chat,
+                messages = messagesByChat[chat.id] ?: emptyList(),
+                aiStatus = aiStatus,
+                isAiGenerating = isAiGenerating,
+                onBack = { activeChatId = null },
+                onSendMessage = { text, reply ->
+                    when (chat.type) {
+                        ChatType.AI -> sendToAi(text, reply)
+                        ChatType.SAVED -> {
+                            appendMessage(
+                                chat.id,
+                                ChatMessage(
+                                    chatId = chat.id,
+                                    senderName = nickname,
+                                    text = text,
+                                    isFromMe = true,
+                                    replyTo = reply
+                                )
                             )
-                        )
-                    ) {
-                        if (msg.isMediaDemo) {
-                            WavyMediaBubble(title = msg.text)
-                        } else {
-                            MessageBubble(message = msg)
+                        }
+                        ChatType.LOCAL_LAN -> {
+                            appendMessage(
+                                chat.id,
+                                ChatMessage(
+                                    chatId = chat.id,
+                                    senderName = nickname,
+                                    text = text,
+                                    isFromMe = true,
+                                    replyTo = reply
+                                )
+                            )
+                            val peer = lanPeers.firstOrNull { "lan_${it.id}" == chat.id }
+                            if (peer != null) {
+                                scope.launch { lanMessenger.sendMessage(peer, text) }
+                            }
                         }
                     }
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ChatTopBar(
-    status: VoltAiStatus,
-    onRefresh: () -> Unit,
-    onOpenVoltAi: () -> Unit
-) {
-    val dotColor by animateColorAsState(
-        targetValue = when (status) {
-            VoltAiStatus.READY -> Color(0xFF22C55E)
-            VoltAiStatus.SERVER_OFFLINE -> Color(0xFFF59E0B)
-            VoltAiStatus.NOT_INSTALLED -> Color(0xFFEF4444)
-            VoltAiStatus.CHECKING -> MaterialTheme.colorScheme.outline
-        },
-        animationSpec = tween(250),
-        label = "statusDot"
-    )
-
-    val subtitle = when (status) {
-        VoltAiStatus.READY -> "Онлайн • 127.0.0.1:8080"
-        VoltAiStatus.SERVER_OFFLINE -> "Сервер спит • Запусти в Volt AI"
-        VoltAiStatus.NOT_INSTALLED -> "Нужен пакет com.voltage.ai"
-        VoltAiStatus.CHECKING -> "Проверка локального ИИ..."
-    }
-
-    AppSurface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .statusBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        shape = RoundedCornerShape(26.dp),
-        color = MaterialTheme.colorScheme.surfaceContainer
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically
-        ) {
-            Box(
-                modifier = Modifier
-                    .size(42.dp)
-                    .clip(CircleShape)
-                    .background(MaterialTheme.colorScheme.primaryContainer),
-                contentAlignment = Alignment.Center
-            ) {
-                Icon(
-                    imageVector = Icons.Rounded.AutoAwesome,
-                    contentDescription = null,
-                    tint = MaterialTheme.colorScheme.onPrimaryContainer
-                )
-            }
-
-            Spacer(modifier = Modifier.width(12.dp))
-
-            Column(modifier = Modifier.weight(1f)) {
-                Text(
-                    text = "Volt AI",
-                    style = MaterialTheme.typography.titleMedium,
-                    fontWeight = FontWeight.SemiBold
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(
-                        modifier = Modifier
-                            .size(8.dp)
-                            .clip(CircleShape)
-                            .background(dotColor)
-                    )
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text(
-                        text = subtitle,
-                        style = MaterialTheme.typography.bodySmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-
-            IconButton(onClick = onRefresh) {
-                Icon(Icons.Rounded.Refresh, contentDescription = "Обновить")
-            }
-
-            if (status == VoltAiStatus.SERVER_OFFLINE) {
-                IconButton(onClick = onOpenVoltAi) {
-                    Icon(Icons.Rounded.OpenInNew, contentDescription = "Открыть Volt AI")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun StatusBanner(
-    status: VoltAiStatus,
-    onOpenVoltAi: () -> Unit
-) {
-    AppSurface(
-        modifier = Modifier
-            .fillMaxWidth()
-            .padding(horizontal = 14.dp, vertical = 4.dp),
-        shape = RoundedCornerShape(20.dp),
-        color = MaterialTheme.colorScheme.secondaryContainer
-    ) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .padding(horizontal = 14.dp, vertical = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-            horizontalArrangement = Arrangement.SpaceBetween
-        ) {
-            Text(
-                text = if (status == VoltAiStatus.NOT_INSTALLED) {
-                    "Установи Volt AI и скачай хотя бы 1 модель"
-                } else {
-                    "Открой Volt AI → Настройки → Подключение"
                 },
-                style = MaterialTheme.typography.bodySmall,
-                modifier = Modifier.weight(1f)
-            )
-            if (status == VoltAiStatus.SERVER_OFFLINE) {
-                Spacer(modifier = Modifier.width(8.dp))
-                FilledTonalButton(onClick = onOpenVoltAi) {
-                    Text("Открыть")
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun MessageBubble(message: ChatUiMessage) {
-    val isUser = message.isFromUser
-    val bubbleShape = if (isUser) {
-        RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp, bottomStart = 22.dp, bottomEnd = 6.dp)
-    } else {
-        RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp, bottomStart = 6.dp, bottomEnd = 22.dp)
-    }
-
-    Row(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalArrangement = if (isUser) Arrangement.End else Arrangement.Start
-    ) {
-        AppSurface(
-            modifier = Modifier.widthIn(max = 310.dp),
-            shape = bubbleShape,
-            color = if (isUser) {
-                MaterialTheme.colorScheme.primaryContainer
-            } else {
-                MaterialTheme.colorScheme.surfaceContainer
-            },
-            contentColor = if (isUser) {
-                MaterialTheme.colorScheme.onPrimaryContainer
-            } else {
-                MaterialTheme.colorScheme.onSurface
-            }
-        ) {
-            Text(
-                text = message.text,
-                style = MaterialTheme.typography.bodyLarge,
-                modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp)
-            )
-        }
-    }
-}
-
-@Composable
-private fun WavyMediaBubble(title: String) {
-    var isPlaying by remember { mutableStateOf(false) }
-    var progress by remember { mutableFloatStateOf(0.35f) }
-
-    LaunchedEffect(isPlaying) {
-        while (isPlaying) {
-            delay(32L)
-            progress = if (progress >= 1f) 0f else progress + 0.004f
-        }
-    }
-
-    Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.Start) {
-        AppSurface(
-            modifier = Modifier.widthIn(max = 310.dp),
-            shape = RoundedCornerShape(topStart = 22.dp, topEnd = 22.dp, bottomStart = 6.dp, bottomEnd = 22.dp),
-            color = MaterialTheme.colorScheme.surfaceContainer
-        ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 12.dp, vertical = 10.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                FilledTonalIconButton(
-                    onClick = { isPlaying = !isPlaying },
-                    modifier = Modifier.size(44.dp)
-                ) {
-                    AnimatedContent(
-                        targetState = isPlaying,
-                        transitionSpec = {
-                            (scaleIn(initialScale = 0.78f, animationSpec = tween(160)) + fadeIn(tween(160))) togetherWith
-                                (scaleOut(targetScale = 0.78f, animationSpec = tween(120)) + fadeOut(tween(120)))
-                        },
-                        label = "playPause"
-                    ) { playing ->
-                        Icon(
-                            imageVector = if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow,
-                            contentDescription = "Воспроизвести"
-                        )
-                    }
-                }
-
-                Spacer(modifier = Modifier.width(10.dp))
-
-                Column(modifier = Modifier.weight(1f)) {
-                    WavySeekBar(
-                        progress = progress,
-                        isPlaying = isPlaying,
-                        onSeek = { progress = it }
-                    )
-                    Spacer(modifier = Modifier.height(2.dp))
-                    Text(
-                        text = title,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun ChatInputBar(
-    text: String,
-    isGenerating: Boolean,
-    onTextChange: (String) -> Unit,
-    onSend: () -> Unit,
-    onStop: () -> Unit
-) {
-    Row(
-        modifier = Modifier
-            .fillMaxWidth()
-            .navigationBarsPadding()
-            .padding(horizontal = 12.dp, vertical = 8.dp),
-        verticalAlignment = Alignment.Bottom
-    ) {
-        AppSurface(
-            modifier = Modifier.weight(1f),
-            shape = RoundedCornerShape(26.dp),
-            color = MaterialTheme.colorScheme.surfaceContainer
-        ) {
-            Box(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .padding(horizontal = 18.dp, vertical = 14.dp)
-            ) {
-                if (text.isEmpty()) {
-                    Text(
-                        text = "Сообщение локальному ИИ...",
-                        style = MaterialTheme.typography.bodyLarge,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant
-                    )
-                }
-                BasicTextField(
-                    value = text,
-                    onValueChange = onTextChange,
-                    textStyle = MaterialTheme.typography.bodyLarge.copy(
-                        color = MaterialTheme.colorScheme.onSurface
-                    ),
-                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
-                    maxLines = 5,
-                    modifier = Modifier.fillMaxWidth()
-                )
-            }
-        }
-
-        Spacer(modifier = Modifier.width(8.dp))
-
-        val buttonState = when {
-            isGenerating -> 2
-            text.isNotBlank() -> 1
-            else -> 0
-        }
-
-        FilledTonalIconButton(
-            onClick = {
-                when (buttonState) {
-                    2 -> onStop()
-                    1 -> onSend()
-                    else -> {}
-                }
-            },
-            modifier = Modifier.size(52.dp)
-        ) {
-            AnimatedContent(
-                targetState = buttonState,
-                transitionSpec = {
-                    (scaleIn(initialScale = 0.78f, animationSpec = tween(160)) + fadeIn(tween(160))) togetherWith
-                        (scaleOut(targetScale = 0.78f, animationSpec = tween(120)) + fadeOut(tween(120)))
+                onStopAi = {
+                    aiJob?.cancel()
+                    isAiGenerating = false
                 },
-                label = "actionButton"
-            ) { state ->
-                when (state) {
-                    2 -> Icon(Icons.Rounded.Stop, contentDescription = "Стоп")
-                    1 -> Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Отправить")
-                    else -> Icon(Icons.Rounded.Mic, contentDescription = "Голосовое")
-                }
-            }
+                onDeleteMessage = { msg ->
+                    val current = messagesByChat[chat.id] ?: emptyList()
+                    messagesByChat[chat.id] = current.filterNot { it.id == msg.id }
+                    persistAll()
+                },
+                onAskAiAboutMessage = { msg ->
+                    activeChatId = CHAT_ID_AI
+                    sendToAi(
+                        promptText = "Объясни или ответь на сообщение:\n«${msg.text}»",
+                        replyTo = ReplyPreview(msg.senderName, msg.text)
+                    )
+                },
+                onOpenVoltAi = { VoltAiClient.launchVoltAi(context) }
+            )
         }
     }
 }
