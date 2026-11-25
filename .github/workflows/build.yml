@@ -1,9 +1,12 @@
-name: Build Optimized APK
+name: Build and Release APK
 
 on:
   push:
     branches: [ main ]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -23,10 +26,18 @@ jobs:
           gradle-version: '8.10.2'
 
       - name: Build Release APK
-        run: gradle assembleRelease --no-daemon
+        run: gradle assembleRelease -PbuildNumber=${{ github.run_number }} --no-daemon
 
-      - name: Upload APK
+      - name: Upload APK Artifact
         uses: actions/upload-artifact@v4
         with:
           name: VoltMessenger-apk
           path: app/build/outputs/apk/release/app-release.apk
+
+      - name: Publish GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: build-${{ github.run_number }}
+          name: Volt Messenger v0.5.${{ github.run_number }}
+          body: Автоматическая сборка Volt Messenger (build ${{ github.run_number }})
+          files: app/build/outputs/apk/release/app-release.apk

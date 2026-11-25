@@ -8,8 +8,10 @@ import android.os.Environment
 import android.provider.MediaStore
 import android.provider.OpenableColumns
 import com.voltage.messenger.core.crypto.VoltCrypto
+import com.voltage.messenger.model.AppThemeConfig
 import com.voltage.messenger.model.AttachmentInfo
 import com.voltage.messenger.model.ChatMessage
+import com.voltage.messenger.model.DEFAULT_AI_SYSTEM_PROMPT
 import com.voltage.messenger.model.ReplyPreview
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -23,6 +25,7 @@ class ChatStorage(private val context: Context) {
     private val prefs = context.getSharedPreferences("volt_messenger_prefs", Context.MODE_PRIVATE)
     private val messagesFile = File(context.filesDir, "messages_v3.json")
     private val peersFile = File(context.filesDir, "known_peers_v1.json")
+    private val groupsFile = File(context.filesDir, "known_groups_v1.json")
     val attachmentsDir = File(context.filesDir, "attachments").apply { mkdirs() }
 
     fun getDeviceId(): String {
@@ -55,12 +58,31 @@ class ChatStorage(private val context: Context) {
         if (clean.isNotEmpty()) prefs.edit().putString("server_name", clean).apply()
     }
 
+    fun loadThemeConfig(): AppThemeConfig {
+        return AppThemeConfig(
+            themeMode = prefs.getInt("theme_mode", 0),
+            accentPreset = prefs.getInt("accent_preset", 0),
+            bubbleRadius = prefs.getInt("bubble_radius", 20),
+            wallpaperStyle = prefs.getInt("wallpaper_style", 1),
+            aiSystemPrompt = prefs.getString("ai_system_prompt", DEFAULT_AI_SYSTEM_PROMPT) ?: DEFAULT_AI_SYSTEM_PROMPT
+        )
+    }
+
+    fun saveThemeConfig(cfg: AppThemeConfig) {
+        prefs.edit()
+            .putInt("theme_mode", cfg.themeMode)
+            .putInt("accent_preset", cfg.accentPreset)
+            .putInt("bubble_radius", cfg.bubbleRadius)
+            .putInt("wallpaper_style", cfg.wallpaperStyle)
+            .putString("ai_system_prompt", cfg.aiSystemPrompt)
+            .apply()
+    }
+
     fun getKeyFingerprintEmojis(seed: String = getDeviceId()): String {
         val bytes = MessageDigest.getInstance("SHA-256").digest(seed.toByteArray())
         return VoltCrypto.emojisFromHash(bytes)
     }
 
-    // Мгновенное чтение метаданных файла без копирования (не тормозит UI даже на файлах 4+ ГБ)
     fun readAttachmentMeta(uri: Uri): AttachmentInfo? {
         return try {
             val cr = context.contentResolver
@@ -97,9 +119,7 @@ class ChatStorage(private val context: Context) {
         val safeName = "${System.currentTimeMillis()}_${info.name.replace(Regex("[^a-zA-Z0-9а-яА-ЯёЁ._-]"), "_")}"
         val outFile = File(attachmentsDir, safeName)
         context.contentResolver.openInputStream(uri)?.use { inp ->
-            outFile.outputStream().use { out ->
-                inp.copyTo(out, 256 * 1024)
-            }
+            outFile.outputStream().use { out -> inp.copyTo(out, 256 * 1024) }
         }
         info.copy(localPath = outFile.absolutePath, sizeBytes = outFile.length())
     }
@@ -109,14 +129,19 @@ class ChatStorage(private val context: Context) {
         return File(attachmentsDir, safe)
     }
 
-    // Копируем принятый файл в публичные Загрузки/VoltMessenger (Android 10+)
+    // Модели .gguf сохраняются прямо в Загрузки/VoltModels (папка Volt AI), остальные — в Загрузки/VoltMessenger
     fun exportToPublicDownloads(sourceFile: File, displayName: String, mimeType: String) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.Q) return
+        val folder = if (displayName.endsWith(".gguf", ignoreCase = true)) {
+            Environment.DIRECTORY_DOWNLOADS + "/VoltModels"
+        } else {
+            Environment.DIRECTORY_DOWNLOADS + "/VoltMessenger"
+        }
         try {
             val values = ContentValues().apply {
                 put(MediaStore.Downloads.DISPLAY_NAME, displayName)
                 put(MediaStore.Downloads.MIME_TYPE, mimeType)
-                put(MediaStore.Downloads.RELATIVE_PATH, Environment.DIRECTORY_DOWNLOADS + "/VoltMessenger")
+                put(MediaStore.Downloads.RELATIVE_PATH, folder)
             }
             val resolver = context.contentResolver
             val uri = resolver.insert(MediaStore.Downloads.EXTERNAL_CONTENT_URI, values) ?: return
@@ -146,6 +171,30 @@ class ChatStorage(private val context: Context) {
                 val id = keys.next()
                 val o = root.optJSONObject(id) ?: continue
                 result[id] = o.optString("nick", id) to o.optString("srv", "Volt-Node")
+            }
+        } catch (_: Exception) {
+        }
+        return result
+    }
+
+    fun saveKnownGroup(groupId: String, groupName: String) {
+        try {
+            val root = if (groupsFile.exists()) JSONObject(groupsFile.readText()) else JSONObject()
+            root.put(groupId, groupName)
+            groupsFile.writeText(root.toString())
+        } catch (_: Exception) {
+        }
+    }
+
+    fun loadKnownGroups(): Map<String, String> {
+        val result = mutableMapOf<String, String>()
+        if (!groupsFile.exists()) return result
+        try {
+            val root = JSONObject(groupsFile.readText())
+            val keys = root.keys()
+            while (keys.hasNext()) {
+                val id = keys.next()
+                result[id] = root.optString(id, "Локальная группа")
             }
         } catch (_: Exception) {
         }

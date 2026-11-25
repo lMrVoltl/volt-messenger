@@ -60,7 +60,9 @@ data class IncomingLanEvent(
     val attachment: AttachmentInfo? = null,
     val progress: Float? = null,
     val speedMbps: Float? = null,
-    val isEncrypted: Boolean = true
+    val isEncrypted: Boolean = true,
+    val groupId: String? = null,
+    val groupName: String? = null
 )
 
 class LanMessenger(
@@ -152,19 +154,11 @@ class LanMessenger(
         start()
     }
 
-    // Ручное добавление устройства по IP (на случай если точка доступа режет широковещательные пакеты)
     fun addManualPeer(ip: String, port: Int, label: String = "Устройство $ip") {
         val cleanIp = ip.trim()
         if (cleanIp.isEmpty() || port !in 1..65535) return
         val id = "ip_${cleanIp.replace(".", "_")}"
-        val peer = LanPeer(
-            id = id,
-            nickname = label,
-            serverName = cleanIp,
-            host = cleanIp,
-            port = port,
-            lastSeenMs = Long.MAX_VALUE // Ручной пир не пропадает по таймауту
-        )
+        val peer = LanPeer(id, label, cleanIp, cleanIp, port, Long.MAX_VALUE)
         peersMap[id] = peer
         storage.saveKnownPeerName(id, peer.nickname, peer.serverName)
         publishPeers()
@@ -194,21 +188,7 @@ class LanMessenger(
         scope.cancel()
     }
 
-    // ==================== UDP BROADCAST DISCOVERY (РАБОТАЕТ НА ТОЧКЕ ДОСТУПА БЕЗ ИНЕТА) ====================
-
-    private fun buildBeaconBytes(port: Int): ByteArray {
-        return JSONObject()
-            .put("magic", "VOLT_LAN_V1")
-            .put("id", shortId)
-            .put("nick", myNickname)
-            .put("srv", myServerName)
-            .put("port", port)
-            .toString()
-            .toByteArray(Charsets.UTF_8)
-    }
-
     private fun startUdpDiscovery(tcpPort: Int) {
-        // 1. Слушатель UDP-маячков
         scope.launch {
             try {
                 val ds = DatagramSocket(null).apply {
@@ -220,11 +200,7 @@ class LanMessenger(
                 val buf = ByteArray(1024)
                 while (isActive && !ds.isClosed) {
                     val packet = DatagramPacket(buf, buf.size)
-                    try {
-                        ds.receive(packet)
-                    } catch (_: Exception) {
-                        break
-                    }
+                    try { ds.receive(packet) } catch (_: Exception) { break }
                     val raw = String(packet.data, 0, packet.length, Charsets.UTF_8)
                     val host = packet.address?.hostAddress ?: continue
                     try {
@@ -242,7 +218,6 @@ class LanMessenger(
                         storage.saveKnownPeerName(peerId, nick, srv)
                         publishPeers()
 
-                        // Если это новый собеседник — сразу отвечаем ему напрямую (unicast), чтобы точка доступа не потеряла обратный пакет
                         if (isNew || json.optBoolean("needReply", false)) {
                             val reply = JSONObject()
                                 .put("magic", "VOLT_LAN_V1")
@@ -253,19 +228,13 @@ class LanMessenger(
                                 .put("needReply", false)
                                 .toString()
                                 .toByteArray(Charsets.UTF_8)
-                            try {
-                                ds.send(DatagramPacket(reply, reply.size, packet.address, udpPort))
-                            } catch (_: Exception) {
-                            }
+                            try { ds.send(DatagramPacket(reply, reply.size, packet.address, udpPort)) } catch (_: Exception) {}
                         }
-                    } catch (_: Exception) {
-                    }
+                    } catch (_: Exception) {}
                 }
-            } catch (_: Exception) {
-            }
+            } catch (_: Exception) {}
         }
 
-        // 2. Периодическая рассылка маячков по ВСЕМ активным Wi-Fi / Hotspot интерфейсам
         scope.launch {
             while (isActive && isStarted) {
                 _localIp.value = detectLocalIpv4()
@@ -283,14 +252,10 @@ class LanMessenger(
                 val ds = udpSocket
                 if (ds != null && !ds.isClosed) {
                     for (addr in targets) {
-                        try {
-                            ds.send(DatagramPacket(data, data.size, addr, udpPort))
-                        } catch (_: Exception) {
-                        }
+                        try { ds.send(DatagramPacket(data, data.size, addr, udpPort)) } catch (_: Exception) {}
                     }
                 }
 
-                // Очистка пропавших пиров (таймаут 15 секунд)
                 val now = System.currentTimeMillis()
                 var changed = false
                 val it = peersMap.entries.iterator()
@@ -302,7 +267,6 @@ class LanMessenger(
                     }
                 }
                 if (changed) publishPeers()
-
                 delay(2200L)
             }
         }
@@ -317,13 +281,10 @@ class LanMessenger(
                 if (!ni.isUp || ni.isLoopback) continue
                 for (ia in ni.interfaceAddresses) {
                     val bcast = ia.broadcast
-                    if (bcast is Inet4Address) {
-                        result.add(bcast)
-                    }
+                    if (bcast is Inet4Address) result.add(bcast)
                 }
             }
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
         try { result.add(InetAddress.getByName("255.255.255.255")) } catch (_: Exception) {}
         try { result.add(InetAddress.getByName("192.168.43.255")) } catch (_: Exception) {}
         return result
@@ -340,9 +301,7 @@ class LanMessenger(
                     val addr = ia.address
                     if (addr is Inet4Address && !addr.isLoopbackAddress) {
                         val ip = addr.hostAddress ?: continue
-                        if (ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.")) {
-                            return ip
-                        }
+                        if (ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.")) return ip
                         fallback = ip
                     }
                 }
@@ -357,9 +316,12 @@ class LanMessenger(
         _peers.value = peersMap.values.sortedBy { it.nickname.lowercase() }
     }
 
-    // ==================== ЗАШИФРОВАННАЯ ОТПРАВКА ТЕКСТА И ФАЙЛОВ ====================
-
-    suspend fun sendTextMessage(peer: LanPeer, text: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun sendTextMessage(
+        peer: LanPeer,
+        text: String,
+        groupId: String? = null,
+        groupName: String? = null
+    ): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
             Socket().use { socket ->
                 socket.tcpNoDelay = true
@@ -375,6 +337,9 @@ class LanMessenger(
                     .put("serverName", myServerName)
                     .put("text", text)
                     .put("ts", System.currentTimeMillis())
+                if (groupId != null) header.put("groupId", groupId)
+                if (groupName != null) header.put("groupName", groupName)
+
                 ch.writeFrame(header.toString().toByteArray(Charsets.UTF_8))
                 ch.flush()
             }
@@ -388,6 +353,8 @@ class LanMessenger(
         peer: LanPeer,
         caption: String,
         attachment: AttachmentInfo,
+        groupId: String? = null,
+        groupName: String? = null,
         onProgress: (progress: Float, speedMbps: Float) -> Unit
     ): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
@@ -418,6 +385,9 @@ class LanMessenger(
                     .put("isVoice", attachment.isVoice)
                     .put("durationSec", attachment.durationSec)
                     .put("ts", System.currentTimeMillis())
+                if (groupId != null) header.put("groupId", groupId)
+                if (groupName != null) header.put("groupName", groupName)
+
                 ch.writeFrame(header.toString().toByteArray(Charsets.UTF_8))
                 ch.flush()
 
@@ -429,7 +399,7 @@ class LanMessenger(
                 }
 
                 stream.use { fileIn ->
-                    val buffer = ByteArray(256 * 1024) // 256 КБ чанк -> высокая скорость, минимум RAM
+                    val buffer = ByteArray(256 * 1024)
                     var sent = 0L
                     val startMs = System.currentTimeMillis()
                     var lastReportMs = 0L
@@ -449,7 +419,6 @@ class LanMessenger(
                             lastReportMs = now
                         }
                     }
-                    // Финальный пустой маркер EOF (1 байт = 0)
                     ch.writeFrame(ByteArray(0), 0)
                     ch.flush()
                 }
@@ -461,15 +430,9 @@ class LanMessenger(
         }
     }
 
-    // ==================== ЗАШИФРОВАННЫЕ АУДИОЗВОНКИ ПО ЛОКАЛЬНОЙ СЕТИ ====================
-
     fun startCall(peer: LanPeer) {
         if (_callState.value.status != CallStatus.IDLE) return
-        _callState.value = LanCallState(
-            status = CallStatus.OUTGOING,
-            peerId = peer.id,
-            peerName = peer.nickname
-        )
+        _callState.value = LanCallState(CallStatus.OUTGOING, peer.id, peer.nickname)
 
         scope.launch {
             try {
@@ -492,17 +455,13 @@ class LanMessenger(
 
                 _callState.value = _callState.value.copy(sessionEmojis = ch.sessionEmojis)
 
-                // Ждём ответ от собеседника ("accept" или "reject")
                 val respJson = JSONObject(String(ch.readFrame(), Charsets.UTF_8))
                 if (respJson.optString("status") != "accept") {
                     endCall()
                     return@launch
                 }
 
-                _callState.value = _callState.value.copy(
-                    status = CallStatus.CONNECTED,
-                    connectedAtMs = System.currentTimeMillis()
-                )
+                _callState.value = _callState.value.copy(status = CallStatus.CONNECTED, connectedAtMs = System.currentTimeMillis())
                 runFullDuplexAudioCall(socket, ch)
             } catch (_: Exception) {
                 endCall()
@@ -510,18 +469,9 @@ class LanMessenger(
         }
     }
 
-    fun acceptIncomingCall() {
-        incomingCallDecision?.complete(true)
-    }
-
-    fun declineIncomingCall() {
-        incomingCallDecision?.complete(false)
-        endCall()
-    }
-
-    fun toggleMute() {
-        _callState.value = _callState.value.copy(isMuted = !_callState.value.isMuted)
-    }
+    fun acceptIncomingCall() { incomingCallDecision?.complete(true) }
+    fun declineIncomingCall() { incomingCallDecision?.complete(false); endCall() }
+    fun toggleMute() { _callState.value = _callState.value.copy(isMuted = !_callState.value.isMuted) }
 
     fun toggleSpeaker() {
         val next = !_callState.value.isSpeaker
@@ -531,8 +481,7 @@ class LanMessenger(
             am?.mode = AudioManager.MODE_IN_COMMUNICATION
             @Suppress("DEPRECATION")
             am?.isSpeakerphoneOn = next
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 
     fun endCall() {
@@ -545,8 +494,7 @@ class LanMessenger(
             am?.mode = AudioManager.MODE_NORMAL
             @Suppress("DEPRECATION")
             am?.isSpeakerphoneOn = false
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
         _callState.value = LanCallState()
     }
 
@@ -555,35 +503,16 @@ class LanMessenger(
         val sampleRate = 16000
         val minRec = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(2560)
         val minPlay = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(2560)
-
         var recorder: AudioRecord? = null
         var track: AudioTrack? = null
 
         try {
             val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
             am?.mode = AudioManager.MODE_IN_COMMUNICATION
-
-            recorder = AudioRecord(
-                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
-                sampleRate,
-                AudioFormat.CHANNEL_IN_MONO,
-                AudioFormat.ENCODING_PCM_16BIT,
-                minRec * 2
-            )
+            recorder = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minRec * 2)
             track = AudioTrack.Builder()
-                .setAudioAttributes(
-                    AudioAttributes.Builder()
-                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
-                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
-                        .build()
-                )
-                .setAudioFormat(
-                    AudioFormat.Builder()
-                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
-                        .setSampleRate(sampleRate)
-                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
-                        .build()
-                )
+                .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
+                .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(sampleRate).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
                 .setBufferSizeInBytes(minPlay * 2)
                 .setTransferMode(AudioTrack.MODE_STREAM)
                 .build()
@@ -592,31 +521,20 @@ class LanMessenger(
             track.play()
 
             val sendJob = scope.launch {
-                val pcm = ByteArray(1280) // 40мс чанк
+                val pcm = ByteArray(1280)
                 val silence = ByteArray(1280)
                 while (!socket.isClosed && _callState.value.status == CallStatus.CONNECTED) {
                     val read = recorder.read(pcm, 0, pcm.size)
                     if (read > 0) {
                         val toSend = if (_callState.value.isMuted) silence else pcm
-                        try {
-                            ch.writeFrame(toSend, read)
-                            ch.flush()
-                        } catch (_: Exception) {
-                            break
-                        }
+                        try { ch.writeFrame(toSend, read); ch.flush() } catch (_: Exception) { break }
                     }
                 }
             }
 
             while (!socket.isClosed && _callState.value.status == CallStatus.CONNECTED) {
-                val frame = try {
-                    ch.readFrame(maxSize = 65536)
-                } catch (_: Exception) {
-                    break
-                }
-                if (frame.isNotEmpty()) {
-                    track.write(frame, 0, frame.size)
-                }
+                val frame = try { ch.readFrame(maxSize = 65536) } catch (_: Exception) { break }
+                if (frame.isNotEmpty()) track.write(frame, 0, frame.size)
             }
             sendJob.cancel()
         } catch (_: Exception) {
@@ -628,8 +546,6 @@ class LanMessenger(
             endCall()
         }
     }
-
-    // ==================== ВХОДЯЩИЕ TCP СОЕДИНЕНИЯ ====================
 
     private suspend fun handleIncomingTcp(client: Socket) {
         try {
@@ -644,11 +560,12 @@ class LanMessenger(
             val peerId = headerJson.optString("peerId")
             val senderName = headerJson.optString("senderName", "Собеседник")
             val serverName = headerJson.optString("serverName", "Volt-Node")
+            val groupId = headerJson.optString("groupId").ifBlank { null }
+            val groupName = headerJson.optString("groupName").ifBlank { null }
             val ts = headerJson.optLong("ts", System.currentTimeMillis())
 
-            if (peerId.isNotEmpty()) {
-                storage.saveKnownPeerName(peerId, senderName, serverName)
-            }
+            if (peerId.isNotEmpty()) storage.saveKnownPeerName(peerId, senderName, serverName)
+            if (groupId != null && groupName != null) storage.saveKnownGroup(groupId, groupName)
 
             when (type) {
                 "text" -> {
@@ -661,7 +578,9 @@ class LanMessenger(
                                 senderName = senderName,
                                 serverName = serverName,
                                 text = text,
-                                timestamp = ts
+                                timestamp = ts,
+                                groupId = groupId,
+                                groupName = groupName
                             )
                         )
                     }
@@ -678,28 +597,9 @@ class LanMessenger(
                     val durationSec = headerJson.optInt("durationSec", 0)
 
                     val outFile = storage.createIncomingFile(fileName)
-                    val baseAttachment = AttachmentInfo(
-                        name = fileName,
-                        localPath = outFile.absolutePath,
-                        mimeType = mimeType,
-                        sizeBytes = expectedSize,
-                        isVoice = isVoice,
-                        durationSec = durationSec
-                    )
+                    val baseAttachment = AttachmentInfo(fileName, outFile.absolutePath, mimeType, expectedSize, isVoice = isVoice, durationSec = durationSec)
 
-                    onEvent(
-                        IncomingLanEvent(
-                            messageId = msgId,
-                            peerId = peerId,
-                            senderName = senderName,
-                            serverName = serverName,
-                            text = caption,
-                            timestamp = ts,
-                            attachment = baseAttachment,
-                            progress = 0f,
-                            speedMbps = 0f
-                        )
-                    )
+                    onEvent(IncomingLanEvent(msgId, peerId, senderName, serverName, caption, ts, baseAttachment, 0f, 0f, true, groupId, groupName))
 
                     var received = 0L
                     val startMs = System.currentTimeMillis()
@@ -708,7 +608,7 @@ class LanMessenger(
                     FileOutputStream(outFile).use { fos ->
                         while (true) {
                             val chunk = ch.readFrame(maxSize = 2 * 1024 * 1024)
-                            if (chunk.isEmpty()) break // EOF
+                            if (chunk.isEmpty()) break
                             fos.write(chunk)
                             received += chunk.size
 
@@ -717,42 +617,15 @@ class LanMessenger(
                                 val elapsedSec = ((now - startMs).coerceAtLeast(1L)) / 1000f
                                 val mbps = (received / (1024f * 1024f)) / elapsedSec
                                 val frac = if (expectedSize > 0L) (received.toFloat() / expectedSize.toFloat()).coerceIn(0f, 0.99f) else 0.5f
-                                onEvent(
-                                    IncomingLanEvent(
-                                        messageId = msgId,
-                                        peerId = peerId,
-                                        senderName = senderName,
-                                        serverName = serverName,
-                                        text = caption,
-                                        timestamp = ts,
-                                        attachment = baseAttachment.copy(sizeBytes = maxOf(expectedSize, received)),
-                                        progress = frac,
-                                        speedMbps = mbps
-                                    )
-                                )
+                                onEvent(IncomingLanEvent(msgId, peerId, senderName, serverName, caption, ts, baseAttachment.copy(sizeBytes = maxOf(expectedSize, received)), frac, mbps, true, groupId, groupName))
                                 lastReportMs = now
                             }
                         }
                     }
 
-                    // Сохраняем принятый не-голосовой файл в Загрузки/VoltMessenger
-                    if (!isVoice) {
-                        storage.exportToPublicDownloads(outFile, fileName, mimeType)
-                    }
+                    if (!isVoice) storage.exportToPublicDownloads(outFile, fileName, mimeType)
 
-                    onEvent(
-                        IncomingLanEvent(
-                            messageId = msgId,
-                            peerId = peerId,
-                            senderName = senderName,
-                            serverName = serverName,
-                            text = caption,
-                            timestamp = ts,
-                            attachment = baseAttachment.copy(sizeBytes = outFile.length()),
-                            progress = null,
-                            speedMbps = null
-                        )
-                    )
+                    onEvent(IncomingLanEvent(msgId, peerId, senderName, serverName, caption, ts, baseAttachment.copy(sizeBytes = outFile.length()), null, null, true, groupId, groupName))
                     client.close()
                 }
 
@@ -767,19 +640,11 @@ class LanMessenger(
                     val decision = CompletableDeferred<Boolean>()
                     incomingCallDecision = decision
 
-                    _callState.value = LanCallState(
-                        status = CallStatus.INCOMING,
-                        peerId = peerId,
-                        peerName = senderName,
-                        sessionEmojis = ch.sessionEmojis
-                    )
+                    _callState.value = LanCallState(CallStatus.INCOMING, peerId, senderName, sessionEmojis = ch.sessionEmojis)
 
                     val accepted = decision.await()
                     if (!accepted) {
-                        try {
-                            ch.writeFrame(JSONObject().put("status", "reject").toString().toByteArray(Charsets.UTF_8))
-                            ch.flush()
-                        } catch (_: Exception) {}
+                        try { ch.writeFrame(JSONObject().put("status", "reject").toString().toByteArray(Charsets.UTF_8)); ch.flush() } catch (_: Exception) {}
                         endCall()
                         return
                     }
@@ -787,10 +652,7 @@ class LanMessenger(
                     ch.writeFrame(JSONObject().put("status", "accept").toString().toByteArray(Charsets.UTF_8))
                     ch.flush()
 
-                    _callState.value = _callState.value.copy(
-                        status = CallStatus.CONNECTED,
-                        connectedAtMs = System.currentTimeMillis()
-                    )
+                    _callState.value = _callState.value.copy(status = CallStatus.CONNECTED, connectedAtMs = System.currentTimeMillis())
                     runFullDuplexAudioCall(client, ch)
                 }
 
@@ -801,14 +663,8 @@ class LanMessenger(
         }
     }
 
-    // ==================== NSD (mDNS) ДОПОЛНИТЕЛЬНО К UDP ====================
-
     private fun sanitizePart(raw: String, fallback: String): String {
-        return raw.replace("--", "-")
-            .replace(Regex("[^a-zA-Z0-9а-яА-ЯёЁ _-]"), "")
-            .trim()
-            .take(14)
-            .ifEmpty { fallback }
+        return raw.replace("--", "-").replace(Regex("[^a-zA-Z0-9а-яА-ЯёЁ _-]"), "").trim().take(14).ifEmpty { fallback }
     }
 
     private fun registerNsdService(port: Int) {

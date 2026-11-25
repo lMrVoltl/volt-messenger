@@ -3,7 +3,11 @@ package com.voltage.messenger.core.ai
 import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.os.Build
+import android.util.Base64
+import com.voltage.messenger.model.DEFAULT_AI_SYSTEM_PROMPT
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.Flow
 import kotlinx.coroutines.flow.flow
@@ -15,6 +19,8 @@ import okhttp3.Request
 import okhttp3.RequestBody.Companion.toRequestBody
 import org.json.JSONArray
 import org.json.JSONObject
+import java.io.ByteArrayOutputStream
+import java.io.File
 import java.util.concurrent.TimeUnit
 
 enum class VoltAiStatus {
@@ -26,7 +32,8 @@ enum class VoltAiStatus {
 
 data class AiChatMessage(
     val role: String,
-    val content: String
+    val content: String,
+    val imagePath: String? = null
 )
 
 object VoltAiClient {
@@ -47,10 +54,7 @@ object VoltAiClient {
     fun isInstalled(context: Context): Boolean {
         return try {
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.TIRAMISU) {
-                context.packageManager.getPackageInfo(
-                    PACKAGE_NAME,
-                    PackageManager.PackageInfoFlags.of(0)
-                )
+                context.packageManager.getPackageInfo(PACKAGE_NAME, PackageManager.PackageInfoFlags.of(0))
             } else {
                 @Suppress("DEPRECATION")
                 context.packageManager.getPackageInfo(PACKAGE_NAME, 0)
@@ -70,7 +74,6 @@ object VoltAiClient {
 
     suspend fun checkStatus(context: Context): VoltAiStatus = withContext(Dispatchers.IO) {
         if (!isInstalled(context)) return@withContext VoltAiStatus.NOT_INSTALLED
-
         val request = Request.Builder()
             .url("$BASE_URL/models")
             .header("Authorization", "Bearer $API_KEY")
@@ -86,14 +89,64 @@ object VoltAiClient {
         }
     }
 
-    fun streamCompletion(history: List<AiChatMessage>): Flow<String> = flow {
+    private fun encodeImageToDataUrl(path: String): String? {
+        return try {
+            val file = File(path)
+            if (!file.exists()) return null
+            val opts = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+            BitmapFactory.decodeFile(path, opts)
+            val maxDim = maxOf(opts.outWidth, opts.outHeight)
+            val sample = if (maxDim > 768) (maxDim / 768).coerceAtLeast(1) else 1
+
+            val bmp = BitmapFactory.decodeFile(path, BitmapFactory.Options().apply { inSampleSize = sample })
+                ?: return null
+            val baos = ByteArrayOutputStream()
+            bmp.compress(Bitmap.CompressFormat.JPEG, 80, baos)
+            bmp.recycle()
+            val b64 = Base64.encodeToString(baos.toByteArray(), Base64.NO_WRAP)
+            "data:image/jpeg;base64,$b64"
+        } catch (_: Exception) {
+            null
+        }
+    }
+
+    fun streamCompletion(
+        history: List<AiChatMessage>,
+        systemPrompt: String = DEFAULT_AI_SYSTEM_PROMPT
+    ): Flow<String> = flow {
         val messagesJson = JSONArray()
-        history.forEach { msg ->
+
+        if (systemPrompt.isNotBlank()) {
             messagesJson.put(
                 JSONObject()
-                    .put("role", msg.role)
-                    .put("content", msg.content)
+                    .put("role", "system")
+                    .put("content", systemPrompt)
             )
+        }
+
+        history.forEach { msg ->
+            val dataUrl = msg.imagePath?.let { encodeImageToDataUrl(it) }
+            if (dataUrl != null && msg.role == "user") {
+                val parts = JSONArray()
+                val textBody = msg.content.ifBlank { "Опиши это изображение подробно." }
+                parts.put(JSONObject().put("type", "text").put("text", textBody))
+                parts.put(
+                    JSONObject()
+                        .put("type", "image_url")
+                        .put("image_url", JSONObject().put("url", dataUrl))
+                )
+                messagesJson.put(
+                    JSONObject()
+                        .put("role", "user")
+                        .put("content", parts)
+                )
+            } else {
+                messagesJson.put(
+                    JSONObject()
+                        .put("role", msg.role)
+                        .put("content", msg.content)
+                )
+            }
         }
 
         val payload = JSONObject()

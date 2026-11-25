@@ -1,7 +1,6 @@
 package com.voltage.messenger.ui.screens
 
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
@@ -39,11 +38,14 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.DoneAll
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Group
+import androidx.compose.material.icons.rounded.GroupAdd
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Menu
 import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Search
+import androidx.compose.material.icons.rounded.Settings
 import androidx.compose.material.icons.rounded.Wifi
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -97,6 +99,8 @@ fun ChatListScreen(
     fingerprintEmojis: String,
     onIdentityChange: (newNick: String, newServerName: String) -> Unit,
     onAddManualPeer: (ip: String, port: Int) -> Unit,
+    onCreateGroup: (groupName: String) -> Unit,
+    onOpenSettings: () -> Unit,
     onChatClick: (ChatRoom) -> Unit,
     onOpenAiClick: () -> Unit,
     onOpenSavedClick: () -> Unit
@@ -107,12 +111,14 @@ fun ChatListScreen(
     var showProfileSheet by remember { mutableStateOf(false) }
     var showNewChatSheet by remember { mutableStateOf(false) }
     var showManualIpDialog by remember { mutableStateOf(false) }
+    var showCreateGroupDialog by remember { mutableStateOf(false) }
 
     val filteredChats = remember(chats, selectedFolder, searchQuery, messagesByChat) {
         chats.filter { chat ->
             val folderOk = when (selectedFolder) {
                 ChatFolder.ALL -> true
                 ChatFolder.LOCAL -> chat.type == ChatType.LOCAL_LAN || chat.type == ChatType.SAVED
+                ChatFolder.GROUPS -> chat.type == ChatType.GROUP_LAN
                 ChatFolder.AI -> chat.type == ChatType.AI
             }
             val queryOk = searchQuery.isBlank() ||
@@ -135,11 +141,11 @@ fun ChatListScreen(
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                        .padding(horizontal = 6.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     IconButton(onClick = { showProfileSheet = true }) {
-                        Icon(Icons.Rounded.Menu, contentDescription = "Меню")
+                        Icon(Icons.Rounded.Menu, contentDescription = "Профиль и узел")
                     }
 
                     AnimatedContent(
@@ -161,7 +167,7 @@ fun ChatListScreen(
                             ) {
                                 if (searchQuery.isEmpty()) {
                                     Text(
-                                        text = "Поиск чатов и серверов...",
+                                        text = "Поиск чатов и групп...",
                                         style = MaterialTheme.typography.bodyLarge,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -170,20 +176,14 @@ fun ChatListScreen(
                                     value = searchQuery,
                                     onValueChange = { searchQuery = it },
                                     singleLine = true,
-                                    textStyle = MaterialTheme.typography.bodyLarge.copy(
-                                        color = MaterialTheme.colorScheme.onSurface
-                                    ),
+                                    textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
                                     cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
                                     modifier = Modifier.fillMaxWidth()
                                 )
                             }
                         } else {
                             Column(modifier = Modifier.padding(start = 6.dp)) {
-                                Text(
-                                    text = "Volt",
-                                    style = MaterialTheme.typography.titleLarge,
-                                    fontWeight = FontWeight.Bold
-                                )
+                                Text("Volt", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                                 Row(verticalAlignment = Alignment.CenterVertically) {
                                     Box(
                                         modifier = Modifier
@@ -193,11 +193,7 @@ fun ChatListScreen(
                                     )
                                     Spacer(modifier = Modifier.width(5.dp))
                                     Text(
-                                        text = if (isLanActive) {
-                                            "«$serverName» • рядом: ${lanPeers.size}"
-                                        } else {
-                                            "Запуск узла..."
-                                        },
+                                        text = if (isLanActive) "«$serverName» • рядом: ${lanPeers.size}" else "Запуск узла...",
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                                         maxLines = 1,
@@ -205,6 +201,12 @@ fun ChatListScreen(
                                     )
                                 }
                             }
+                        }
+                    }
+
+                    if (!isSearching) {
+                        IconButton(onClick = onOpenSettings) {
+                            Icon(Icons.Rounded.Settings, contentDescription = "Настройки и обновления")
                         }
                     }
 
@@ -218,10 +220,7 @@ fun ChatListScreen(
                             }
                         }
                     ) {
-                        Icon(
-                            imageVector = if (isSearching) Icons.Rounded.Close else Icons.Rounded.Search,
-                            contentDescription = "Поиск"
-                        )
+                        Icon(if (isSearching) Icons.Rounded.Close else Icons.Rounded.Search, contentDescription = "Поиск")
                     }
                 }
 
@@ -264,10 +263,7 @@ fun ChatListScreen(
                 Box(
                     modifier = Modifier.animateItem(
                         fadeInSpec = tween(200),
-                        placementSpec = spring(
-                            dampingRatio = 0.88f,
-                            stiffness = 420f
-                        )
+                        placementSpec = spring(dampingRatio = 0.88f, stiffness = 420f)
                     )
                 ) {
                     ChatListItemRow(
@@ -300,6 +296,16 @@ fun ChatListScreen(
                 )
 
                 ListItem(
+                    headlineContent = { Text("Создать локальную группу") },
+                    supportingContent = { Text("Общий зашифрованный чат для всех рядом") },
+                    leadingContent = { Icon(Icons.Rounded.GroupAdd, null, tint = MaterialTheme.colorScheme.primary) },
+                    modifier = Modifier.clickable {
+                        showNewChatSheet = false
+                        showCreateGroupDialog = true
+                    }
+                )
+
+                ListItem(
                     headlineContent = { Text("Подключиться по IP вручную") },
                     supportingContent = { Text("Если точка доступа блокирует автопоиск") },
                     leadingContent = { Icon(Icons.Rounded.AddLink, null, tint = MaterialTheme.colorScheme.primary) },
@@ -311,7 +317,7 @@ fun ChatListScreen(
 
                 ListItem(
                     headlineContent = { Text("Написать Volt AI") },
-                    supportingContent = { Text("Локальная нейросеть на устройстве") },
+                    supportingContent = { Text("Локальная нейросеть + анализ картинок") },
                     leadingContent = { Icon(Icons.Rounded.AutoAwesome, null, tint = MaterialTheme.colorScheme.primary) },
                     modifier = Modifier.clickable {
                         showNewChatSheet = false
@@ -340,7 +346,7 @@ fun ChatListScreen(
 
                 if (lanPeers.isEmpty()) {
                     Text(
-                        text = "Включи Wi-Fi или точку доступа и открой Volt Messenger на втором телефоне — устройства найдут друг друга за 2–3 секунды.",
+                        text = "Включи Wi-Fi или точку доступа и открой Volt Messenger на втором телефоне.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
@@ -362,6 +368,36 @@ fun ChatListScreen(
         }
     }
 
+    if (showCreateGroupDialog) {
+        var groupName by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showCreateGroupDialog = false },
+            icon = { Icon(Icons.Rounded.GroupAdd, null) },
+            title = { Text("Новая локальная группа") },
+            text = {
+                OutlinedTextField(
+                    value = groupName,
+                    onValueChange = { groupName = it },
+                    label = { Text("Название группы") },
+                    singleLine = true
+                )
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        if (groupName.isNotBlank()) {
+                            onCreateGroup(groupName.trim())
+                            showCreateGroupDialog = false
+                        }
+                    }
+                ) { Text("Создать") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showCreateGroupDialog = false }) { Text("Отмена") }
+            }
+        )
+    }
+
     if (showManualIpDialog) {
         var ipText by remember { mutableStateOf("192.168.43.1") }
         var portText by remember { mutableStateOf("") }
@@ -370,38 +406,21 @@ fun ChatListScreen(
             title = { Text("Подключиться по IP") },
             text = {
                 Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
-                    Text(
-                        text = "Посмотри IP и порт в меню «Профиль и сервер» на втором телефоне.",
-                        style = MaterialTheme.typography.bodySmall
-                    )
-                    OutlinedTextField(
-                        value = ipText,
-                        onValueChange = { ipText = it },
-                        label = { Text("IP-адрес") },
-                        singleLine = true
-                    )
-                    OutlinedTextField(
-                        value = portText,
-                        onValueChange = { portText = it.filter { c -> c.isDigit() } },
-                        label = { Text("Порт (например 41234)") },
-                        singleLine = true
-                    )
+                    Text("Посмотри IP и порт в боковом меню на втором телефоне.", style = MaterialTheme.typography.bodySmall)
+                    OutlinedTextField(value = ipText, onValueChange = { ipText = it }, label = { Text("IP-адрес") }, singleLine = true)
+                    OutlinedTextField(value = portText, onValueChange = { portText = it.filter { c -> c.isDigit() } }, label = { Text("Порт") }, singleLine = true)
                 }
             },
             confirmButton = {
-                Button(
-                    onClick = {
-                        val p = portText.toIntOrNull() ?: 0
-                        if (ipText.isNotBlank() && p in 1..65535) {
-                            onAddManualPeer(ipText.trim(), p)
-                            showManualIpDialog = false
-                        }
+                Button(onClick = {
+                    val p = portText.toIntOrNull() ?: 0
+                    if (ipText.isNotBlank() && p in 1..65535) {
+                        onAddManualPeer(ipText.trim(), p)
+                        showManualIpDialog = false
                     }
-                ) { Text("Добавить") }
+                }) { Text("Добавить") }
             },
-            dismissButton = {
-                TextButton(onClick = { showManualIpDialog = false }) { Text("Отмена") }
-            }
+            dismissButton = { TextButton(onClick = { showManualIpDialog = false }) { Text("Отмена") } }
         )
     }
 
@@ -421,11 +440,7 @@ fun ChatListScreen(
                     .navigationBarsPadding()
                     .padding(horizontal = 20.dp, vertical = 8.dp)
             ) {
-                Text(
-                    text = "Профиль и локальный сервер",
-                    style = MaterialTheme.typography.titleLarge,
-                    fontWeight = FontWeight.Bold
-                )
+                Text("Профиль и локальный сервер", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
                     text = if (isLanActive) "Твой адрес: $lanIp:$lanPort (E2EE AES-256-GCM)" else "Сервер выключен",
@@ -459,27 +474,13 @@ fun ChatListScreen(
 
                 Spacer(modifier = Modifier.height(14.dp))
 
-                AppSurface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surface
-                ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
+                AppSurface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surface) {
+                    Row(modifier = Modifier.padding(14.dp), verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Rounded.Lock, null, tint = MaterialTheme.colorScheme.primary)
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Отпечаток ключа устройства",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = fingerprintEmojis,
-                                style = MaterialTheme.typography.titleMedium
-                            )
+                            Text("Отпечаток ключа устройства", style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                            Text(fingerprintEmojis, style = MaterialTheme.typography.titleMedium)
                         }
                     }
                 }
@@ -488,17 +489,12 @@ fun ChatListScreen(
 
                 Button(
                     onClick = {
-                        onIdentityChange(
-                            draftNick.trim().ifEmpty { nickname },
-                            draftServer.trim().ifEmpty { serverName }
-                        )
+                        onIdentityChange(draftNick.trim().ifEmpty { nickname }, draftServer.trim().ifEmpty { serverName })
                         showProfileSheet = false
                     },
                     shape = RoundedCornerShape(16.dp),
                     modifier = Modifier.fillMaxWidth()
-                ) {
-                    Text("Сохранить и обновить узел")
-                }
+                ) { Text("Сохранить и обновить узел") }
 
                 Spacer(modifier = Modifier.height(16.dp))
             }
@@ -522,7 +518,7 @@ private fun ChatListItemRow(
 
     val isOnlineNow = when (chat.type) {
         ChatType.AI -> aiStatus == VoltAiStatus.READY
-        ChatType.LOCAL_LAN -> chat.isOnline
+        ChatType.LOCAL_LAN, ChatType.GROUP_LAN -> chat.isOnline
         ChatType.SAVED -> false
     }
 
@@ -530,11 +526,16 @@ private fun ChatListItemRow(
         lastMessage != null -> {
             val base = when {
                 lastMessage.attachment?.isVoice == true -> "🎤 Голосовое (${lastMessage.attachment.formattedDuration()})"
+                lastMessage.attachment?.isAiModel == true -> "🧠 Модель ИИ: ${lastMessage.attachment.name}"
                 lastMessage.attachment != null && lastMessage.text.isBlank() -> "📎 ${lastMessage.attachment.name}"
                 lastMessage.attachment != null -> "📎 ${lastMessage.text}"
                 else -> lastMessage.text
             }
-            if (lastMessage.isFromMe) "Вы: $base" else base
+            when {
+                lastMessage.isFromMe -> "Вы: $base"
+                chat.type == ChatType.GROUP_LAN -> "${lastMessage.senderName}: $base"
+                else -> base
+            }
         }
         chat.type == ChatType.LOCAL_LAN -> "Сервер: ${chat.serverName ?: "Volt-Node"} • ${if (chat.isOnline) "рядом" else "офлайн"}"
         else -> chat.subtitle
@@ -553,21 +554,14 @@ private fun ChatListItemRow(
         ) {
             Box(modifier = Modifier.size(54.dp)) {
                 Box(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .clip(CircleShape)
-                        .background(bg),
+                    modifier = Modifier.fillMaxSize().clip(CircleShape).background(bg),
                     contentAlignment = Alignment.Center
                 ) {
                     when (chat.type) {
                         ChatType.AI -> Icon(Icons.Rounded.AutoAwesome, null, tint = fg, modifier = Modifier.size(26.dp))
                         ChatType.SAVED -> Icon(Icons.Rounded.Bookmark, null, tint = fg, modifier = Modifier.size(26.dp))
-                        ChatType.LOCAL_LAN -> Text(
-                            text = chat.title.take(1).uppercase(),
-                            style = MaterialTheme.typography.titleLarge,
-                            fontWeight = FontWeight.Bold,
-                            color = fg
-                        )
+                        ChatType.GROUP_LAN -> Icon(Icons.Rounded.Group, null, tint = fg, modifier = Modifier.size(26.dp))
+                        ChatType.LOCAL_LAN -> Text(chat.title.take(1).uppercase(), style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold, color = fg)
                     }
                 }
 
@@ -588,10 +582,7 @@ private fun ChatListItemRow(
             Spacer(modifier = Modifier.width(14.dp))
 
             Column(modifier = Modifier.weight(1f)) {
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = chat.title,
                         style = MaterialTheme.typography.titleMedium,
@@ -603,29 +594,15 @@ private fun ChatListItemRow(
 
                     if (lastMessage != null) {
                         if (lastMessage.isFromMe) {
-                            Icon(
-                                imageVector = Icons.Rounded.DoneAll,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary,
-                                modifier = Modifier
-                                    .padding(end = 4.dp)
-                                    .size(16.dp)
-                            )
+                            Icon(Icons.Rounded.DoneAll, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(end = 4.dp).size(16.dp))
                         }
-                        Text(
-                            text = lastMessage.timeLabel,
-                            style = MaterialTheme.typography.labelSmall,
-                            color = MaterialTheme.colorScheme.onSurfaceVariant
-                        )
+                        Text(lastMessage.timeLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
 
                 Spacer(modifier = Modifier.height(3.dp))
 
-                Row(
-                    modifier = Modifier.fillMaxWidth(),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
+                Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                     Text(
                         text = previewText.replace("\n", " "),
                         style = MaterialTheme.typography.bodyMedium,
@@ -639,26 +616,13 @@ private fun ChatListItemRow(
 
                     if (chat.unreadCount > 0) {
                         Box(
-                            modifier = Modifier
-                                .clip(CircleShape)
-                                .background(MaterialTheme.colorScheme.primary)
-                                .padding(horizontal = 7.dp, vertical = 2.dp),
+                            modifier = Modifier.clip(CircleShape).background(MaterialTheme.colorScheme.primary).padding(horizontal = 7.dp, vertical = 2.dp),
                             contentAlignment = Alignment.Center
                         ) {
-                            Text(
-                                text = chat.unreadCount.toString(),
-                                style = MaterialTheme.typography.labelSmall,
-                                color = MaterialTheme.colorScheme.onPrimary,
-                                fontWeight = FontWeight.Bold
-                            )
+                            Text(chat.unreadCount.toString(), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onPrimary, fontWeight = FontWeight.Bold)
                         }
                     } else if (chat.isPinned) {
-                        Icon(
-                            imageVector = Icons.Rounded.PushPin,
-                            contentDescription = "Закреплён",
-                            tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f),
-                            modifier = Modifier.size(16.dp)
-                        )
+                        Icon(Icons.Rounded.PushPin, "Закреплён", tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f), modifier = Modifier.size(16.dp))
                     }
                 }
             }

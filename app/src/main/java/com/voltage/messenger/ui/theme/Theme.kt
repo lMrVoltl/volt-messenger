@@ -4,6 +4,7 @@ import android.os.Build
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.isSystemInDarkTheme
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.material3.ColorScheme
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.Surface
 import androidx.compose.material3.darkColorScheme
@@ -19,6 +20,7 @@ import androidx.compose.ui.graphics.Shape
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.Dp
 import androidx.compose.ui.unit.dp
+import com.voltage.messenger.model.AppThemeConfig
 
 enum class UiDesignStyle {
     MATERIAL_YOU,
@@ -26,43 +28,73 @@ enum class UiDesignStyle {
 }
 
 val LocalDesignStyle = staticCompositionLocalOf { UiDesignStyle.MATERIAL_YOU }
+val LocalThemeConfig = staticCompositionLocalOf { AppThemeConfig() }
 
-private val FallbackDarkColors = darkColorScheme(
-    primary = Color(0xFFA8C7FA),
-    onPrimary = Color(0xFF062E6F),
-    primaryContainer = Color(0xFF0842A0),
-    onPrimaryContainer = Color(0xFFD3E3FD),
-    secondaryContainer = Color(0xFF282A2F),
-    surface = Color(0xFF111318),
-    surfaceContainer = Color(0xFF1D2026)
-)
+private fun presetColorScheme(preset: Int, dark: Boolean): ColorScheme = when (preset) {
+    2 -> if (dark) darkColorScheme(
+        primary = Color(0xFF6EE7B7), onPrimary = Color(0xFF003826),
+        primaryContainer = Color(0xFF065F46), onPrimaryContainer = Color(0xFFD1FAE5),
+        secondaryContainer = Color(0xFF1F2F2A), surface = Color(0xFF0E1412), surfaceContainer = Color(0xFF19221F)
+    ) else lightColorScheme(
+        primary = Color(0xFF059669), onPrimary = Color.White,
+        primaryContainer = Color(0xFFD1FAE5), onPrimaryContainer = Color(0xFF022C22),
+        secondaryContainer = Color(0xFFE6F4EE), surface = Color(0xFFF6FBF9), surfaceContainer = Color(0xFFEAF3EF)
+    )
 
-private val FallbackLightColors = lightColorScheme(
-    primary = Color(0xFF0B57D0),
-    onPrimary = Color.White,
-    primaryContainer = Color(0xFFD3E3FD),
-    onPrimaryContainer = Color(0xFF041E49),
-    secondaryContainer = Color(0xFFE8EDF5),
-    surface = Color(0xFFF8F9FC),
-    surfaceContainer = Color(0xFFEDF1F7)
-)
+    3 -> if (dark) darkColorScheme(
+        primary = Color(0xFFD8B4FE), onPrimary = Color(0xFF3B0764),
+        primaryContainer = Color(0xFF581C87), onPrimaryContainer = Color(0xFFF3E8FF),
+        secondaryContainer = Color(0xFF2B2233), surface = Color(0xFF131017), surfaceContainer = Color(0xFF1E1924)
+    ) else lightColorScheme(
+        primary = Color(0xFF7C3AED), onPrimary = Color.White,
+        primaryContainer = Color(0xFFEDE9FE), onPrimaryContainer = Color(0xFF2E1065),
+        secondaryContainer = Color(0xFFF3EFFB), surface = Color(0xFFFAF8FE), surfaceContainer = Color(0xFFF0EBF9)
+    )
+
+    4 -> if (dark) darkColorScheme(
+        primary = Color(0xFFFDBA74), onPrimary = Color(0xFF431407),
+        primaryContainer = Color(0xFF9A3412), onPrimaryContainer = Color(0xFFFFEDD5),
+        secondaryContainer = Color(0xFF31241E), surface = Color(0xFF16110F), surfaceContainer = Color(0xFF221B18)
+    ) else lightColorScheme(
+        primary = Color(0xFFEA580C), onPrimary = Color.White,
+        primaryContainer = Color(0xFFFFEDD5), onPrimaryContainer = Color(0xFF431407),
+        secondaryContainer = Color(0xFFFBEFE8), surface = Color(0xFFFFFAF7), surfaceContainer = Color(0xFFF7EEE8)
+    )
+
+    else -> if (dark) darkColorScheme(
+        primary = Color(0xFFA8C7FA), onPrimary = Color(0xFF062E6F),
+        primaryContainer = Color(0xFF1E3A8A), onPrimaryContainer = Color(0xFFD3E3FD),
+        secondaryContainer = Color(0xFF232834), surface = Color(0xFF101319), surfaceContainer = Color(0xFF1B202A)
+    ) else lightColorScheme(
+        primary = Color(0xFF2563EB), onPrimary = Color.White,
+        primaryContainer = Color(0xFFDBEAFE), onPrimaryContainer = Color(0xFF172554),
+        secondaryContainer = Color(0xFFE8EEF7), surface = Color(0xFFF8FAFE), surfaceContainer = Color(0xFFEDF2FA)
+    )
+}
 
 @Composable
 fun VoltMessengerTheme(
+    config: AppThemeConfig = AppThemeConfig(),
     designStyle: UiDesignStyle = UiDesignStyle.MATERIAL_YOU,
-    darkTheme: Boolean = isSystemInDarkTheme(),
     content: @Composable () -> Unit
 ) {
     val context = LocalContext.current
-    val colorScheme = when {
-        Build.VERSION.SDK_INT >= Build.VERSION_CODES.S -> {
-            if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
-        }
-        darkTheme -> FallbackDarkColors
-        else -> FallbackLightColors
+    val darkTheme = when (config.themeMode) {
+        1 -> false
+        2 -> true
+        else -> isSystemInDarkTheme()
     }
 
-    CompositionLocalProvider(LocalDesignStyle provides designStyle) {
+    val colorScheme = if (config.accentPreset == 0 && Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) {
+        if (darkTheme) dynamicDarkColorScheme(context) else dynamicLightColorScheme(context)
+    } else {
+        presetColorScheme(config.accentPreset, darkTheme)
+    }
+
+    CompositionLocalProvider(
+        LocalDesignStyle provides designStyle,
+        LocalThemeConfig provides config
+    ) {
         MaterialTheme(
             colorScheme = colorScheme,
             content = content

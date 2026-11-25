@@ -55,6 +55,7 @@ import com.voltage.messenger.model.ReplyPreview
 import com.voltage.messenger.ui.screens.CallOverlay
 import com.voltage.messenger.ui.screens.ChatListScreen
 import com.voltage.messenger.ui.screens.ChatScreen
+import com.voltage.messenger.ui.screens.SettingsScreen
 import com.voltage.messenger.ui.theme.VoltMessengerTheme
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.flow.catch
@@ -63,21 +64,27 @@ import java.util.UUID
 
 private const val CHAT_ID_SAVED = "saved_messages"
 private const val CHAT_ID_AI = "volt_ai_local"
+private const val GROUP_ID_ROOM_ALL = "room_all"
 
 private val VOLT_AI_GUIDE_TEXT = """
 📘 Как пользоваться локальным ИИ (Volt AI)
 
 1. Настройка в приложении Volt AI:
-• Установи приложение Volt AI (com.voltage.ai) и скачай хотя бы 1 языковую модель.
-• Загрузи модель в память.
-• Открой Настройки → Подключение и включи локальный сервер (127.0.0.1:8080).
+• Установи Volt AI (com.voltage.ai) и скачай хотя бы 1 модель .gguf (или прими модель прямо от друга в этом мессенджере — она сама сохранится в Загрузки/VoltModels!).
+• Загрузи модель в память и включи локальный сервер (127.0.0.1:8080).
 
 2. Использование в Volt Messenger:
-• В этом чате — пиши любые вопросы, ответы печатаются локально прямо на телефоне.
-• В любом другом чате — нажми коротким тапом на сообщение → «Спросить у Volt AI». Откроется мини-окно поверх чата с готовым ответом.
+• В этом чате — пиши вопросы или прикрепляй фото (скрепка) для анализа.
+• В любом другом чате — нажми коротким тапом на сообщение → «Спросить у Volt AI».
 
-💡 Чтобы снова открыть эту памятку, напиши слово: инструкция
+💡 Напиши слово «инструкция», чтобы открыть эту памятку снова.
 """.trimIndent()
+
+private sealed interface AppRoute {
+    data object List : AppRoute
+    data class Chat(val chatId: String) : AppRoute
+    data object Settings : AppRoute
+}
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -85,13 +92,22 @@ class MainActivity : ComponentActivity() {
         enableEdgeToEdge()
         unlockHighRefreshRate()
         setContent {
-            VoltMessengerTheme {
-                VoltMessengerApp()
+            val storage = remember { ChatStorage(this) }
+            var themeConfig by remember { mutableStateOf(storage.loadThemeConfig()) }
+
+            VoltMessengerTheme(config = themeConfig) {
+                VoltMessengerApp(
+                    storage = storage,
+                    themeConfig = themeConfig,
+                    onThemeConfigChange = {
+                        themeConfig = it
+                        storage.saveThemeConfig(it)
+                    }
+                )
             }
         }
     }
 
-    // Запрашиваем максимальную герцовку экрана (120 Гц), чтобы система не резала анимации до 60 Гц
     private fun unlockHighRefreshRate() {
         try {
             val modes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
@@ -110,12 +126,15 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-fun VoltMessengerApp() {
+fun VoltMessengerApp(
+    storage: ChatStorage,
+    themeConfig: com.voltage.messenger.model.AppThemeConfig,
+    onThemeConfigChange: (com.voltage.messenger.model.AppThemeConfig) -> Unit
+) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
     val scope = rememberCoroutineScope()
 
-    val storage = remember { ChatStorage(context) }
     val voiceManager = remember { VoiceAudioManager(context) }
     val voicePlayback by voiceManager.playback.collectAsState()
 
@@ -123,48 +142,33 @@ fun VoltMessengerApp() {
     var serverName by remember { mutableStateOf(storage.getServerName()) }
     val fingerprint = remember { storage.getKeyFingerprintEmojis() }
 
-    var activeChatId by remember { mutableStateOf<String?>(null) }
+    var route by remember { mutableStateOf<AppRoute>(AppRoute.List) }
     var aiStatus by remember { mutableStateOf(VoltAiStatus.CHECKING) }
     var isAiGenerating by remember { mutableStateOf(false) }
     var aiJob by remember { mutableStateOf<Job?>(null) }
 
     val unreadCounts = remember { mutableStateMapOf<String, Int>() }
     val knownPeers = remember { mutableStateMapOf<String, Pair<String, String>>().apply { putAll(storage.loadKnownPeers()) } }
+    val knownGroups = remember {
+        mutableStateMapOf<String, String>().apply {
+            put(GROUP_ID_ROOM_ALL, "Общая комната")
+            putAll(storage.loadKnownGroups())
+        }
+    }
+
     val messagesByChat = remember {
         mutableStateMapOf<String, List<ChatMessage>>().apply {
             storage.loadMessages().forEach { (k, v) -> put(k, v) }
             if (get(CHAT_ID_SAVED).isNullOrEmpty()) {
-                put(
-                    CHAT_ID_SAVED,
-                    listOf(
-                        ChatMessage(
-                            chatId = CHAT_ID_SAVED,
-                            senderName = "Избранное",
-                            text = "Личное пространство для заметок, файлов и голосовых. Нажми коротким тапом на сообщение для меню и Volt AI.",
-                            isFromMe = false
-                        )
-                    )
-                )
+                put(CHAT_ID_SAVED, listOf(ChatMessage(chatId = CHAT_ID_SAVED, senderName = "Избранное", text = "Личное пространство для заметок, файлов и голосовых.", isFromMe = false)))
             }
             if (get(CHAT_ID_AI).isNullOrEmpty()) {
-                put(
-                    CHAT_ID_AI,
-                    listOf(
-                        ChatMessage(
-                            chatId = CHAT_ID_AI,
-                            senderName = "Volt AI",
-                            text = VOLT_AI_GUIDE_TEXT,
-                            isFromMe = false
-                        )
-                    )
-                )
+                put(CHAT_ID_AI, listOf(ChatMessage(chatId = CHAT_ID_AI, senderName = "Volt AI", text = VOLT_AI_GUIDE_TEXT, isFromMe = false)))
             }
         }
     }
 
-    fun persistAll() {
-        storage.saveMessages(messagesByChat.toMap())
-    }
+    fun persistAll() { storage.saveMessages(messagesByChat.toMap()) }
 
     fun upsertMessage(chatId: String, msg: ChatMessage, countUnread: Boolean = true) {
         val current = messagesByChat[chatId] ?: emptyList()
@@ -175,7 +179,8 @@ fun VoltMessengerApp() {
             messagesByChat[chatId] = copy
         } else {
             messagesByChat[chatId] = current + msg
-            if (countUnread && activeChatId != chatId && !msg.isFromMe) {
+            val activeChat = (route as? AppRoute.Chat)?.chatId
+            if (countUnread && activeChat != chatId && !msg.isFromMe) {
                 unreadCounts[chatId] = (unreadCounts[chatId] ?: 0) + 1
             }
         }
@@ -190,13 +195,7 @@ fun VoltMessengerApp() {
     fun updateTransferProgress(chatId: String, msgId: String, progress: Float?, speedMbps: Float?, attachment: AttachmentInfo? = null) {
         val current = messagesByChat[chatId] ?: return
         messagesByChat[chatId] = current.map {
-            if (it.id == msgId) {
-                it.copy(
-                    transferProgress = progress,
-                    transferSpeedMbps = speedMbps,
-                    attachment = attachment ?: it.attachment
-                )
-            } else it
+            if (it.id == msgId) it.copy(transferProgress = progress, transferSpeedMbps = speedMbps, attachment = attachment ?: it.attachment) else it
         }
         if (progress == null) persistAll()
     }
@@ -210,8 +209,13 @@ fun VoltMessengerApp() {
             myServerName = serverName,
             onEvent = { ev ->
                 scope.launch {
-                    val chatId = "lan_${ev.peerId}"
-                    knownPeers[ev.peerId] = ev.senderName to ev.serverName
+                    val chatId = if (ev.groupId != null) {
+                        knownGroups[ev.groupId] = ev.groupName ?: knownGroups[ev.groupId] ?: "Локальная группа"
+                        "grp_${ev.groupId}"
+                    } else {
+                        knownPeers[ev.peerId] = ev.senderName to ev.serverName
+                        "lan_${ev.peerId}"
+                    }
                     upsertMessage(
                         chatId = chatId,
                         msg = ChatMessage(
@@ -238,22 +242,17 @@ fun VoltMessengerApp() {
     val lanIp by lanMessenger.localIp.collectAsState()
     val callState by lanMessenger.callState.collectAsState()
 
-    val acceptCallPermLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted ->
+    val acceptCallPermLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
         if (granted) lanMessenger.acceptIncomingCall()
         else {
-            Toast.makeText(context, "Нужен доступ к микрофону для звонка", Toast.LENGTH_SHORT).show()
+            Toast.makeText(context, "Нужен доступ к микрофону", Toast.LENGTH_SHORT).show()
             lanMessenger.declineIncomingCall()
         }
     }
 
     DisposableEffect(Unit) {
         lanMessenger.start()
-        onDispose {
-            lanMessenger.destroy()
-            voiceManager.destroy()
-        }
+        onDispose { lanMessenger.destroy(); voiceManager.destroy() }
     }
 
     DisposableEffect(lifecycleOwner) {
@@ -266,114 +265,85 @@ fun VoltMessengerApp() {
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
-    val allChats = remember(lanPeers, unreadCounts.toMap(), aiStatus, messagesByChat.keys.toSet(), knownPeers.toMap()) {
+    val allChats = remember(lanPeers, unreadCounts.toMap(), aiStatus, messagesByChat.keys.toSet(), knownPeers.toMap(), knownGroups.toMap()) {
         buildList {
-            add(
-                ChatRoom(
-                    id = CHAT_ID_SAVED,
-                    title = "Избранное",
-                    subtitle = "Заметки, файлы и голосовые",
-                    type = ChatType.SAVED,
-                    isPinned = true,
-                    unreadCount = unreadCounts[CHAT_ID_SAVED] ?: 0,
-                    avatarColorIndex = 0
-                )
-            )
-            add(
-                ChatRoom(
-                    id = CHAT_ID_AI,
-                    title = "Volt AI",
-                    subtitle = "Локальная нейросеть",
-                    type = ChatType.AI,
-                    isOnline = aiStatus == VoltAiStatus.READY,
-                    isPinned = true,
-                    unreadCount = unreadCounts[CHAT_ID_AI] ?: 0,
-                    avatarColorIndex = 1
-                )
-            )
+            add(ChatRoom(CHAT_ID_SAVED, "Избранное", "Заметки, файлы и голосовые", ChatType.SAVED, isPinned = true, unreadCount = unreadCounts[CHAT_ID_SAVED] ?: 0, avatarColorIndex = 0))
+            add(ChatRoom(CHAT_ID_AI, "Volt AI", "Локальная нейросеть", ChatType.AI, isOnline = aiStatus == VoltAiStatus.READY, isPinned = true, unreadCount = unreadCounts[CHAT_ID_AI] ?: 0, avatarColorIndex = 1))
 
-            val activeIds = mutableSetOf<String>()
-            lanPeers.forEachIndexed { idx, peer ->
-                val cid = "lan_${peer.id}"
-                activeIds.add(cid)
+            // Локальные группы
+            knownGroups.forEach { (gid, gname) ->
+                val cid = "grp_$gid"
                 add(
                     ChatRoom(
                         id = cid,
-                        title = peer.nickname,
-                        subtitle = "Сервер: ${peer.serverName} • ${peer.host}",
-                        type = ChatType.LOCAL_LAN,
-                        isOnline = true,
+                        title = gname,
+                        subtitle = "Локальная группа • в сети: ${lanPeers.size + 1}",
+                        type = ChatType.GROUP_LAN,
+                        isOnline = lanPeers.isNotEmpty(),
+                        isPinned = gid == GROUP_ID_ROOM_ALL,
                         unreadCount = unreadCounts[cid] ?: 0,
-                        avatarColorIndex = (idx + 2) % 3,
-                        peerHost = peer.host,
-                        peerPort = peer.port,
-                        serverName = peer.serverName
+                        avatarColorIndex = 2
                     )
                 )
             }
 
-            // Сохраняем в списке чаты с теми, кто временно вышел из сети
+            // Онлайн устройства рядом
+            val activeIds = mutableSetOf<String>()
+            lanPeers.forEachIndexed { idx, peer ->
+                val cid = "lan_${peer.id}"
+                activeIds.add(cid)
+                add(ChatRoom(cid, peer.nickname, "Сервер: ${peer.serverName} • ${peer.host}", ChatType.LOCAL_LAN, isOnline = true, unreadCount = unreadCounts[cid] ?: 0, avatarColorIndex = (idx + 2) % 3, peerHost = peer.host, peerPort = peer.port, serverName = peer.serverName))
+            }
+
+            // Офлайн-чаты с сохранённой историей
             messagesByChat.keys.filter { it.startsWith("lan_") && it !in activeIds }.forEachIndexed { idx, cid ->
                 val pid = cid.removePrefix("lan_")
                 val meta = knownPeers[pid]
-                add(
-                    ChatRoom(
-                        id = cid,
-                        title = meta?.first ?: pid,
-                        subtitle = "Не в сети",
-                        type = ChatType.LOCAL_LAN,
-                        isOnline = false,
-                        unreadCount = unreadCounts[cid] ?: 0,
-                        avatarColorIndex = (idx + 2) % 3,
-                        serverName = meta?.second
-                    )
-                )
+                add(ChatRoom(cid, meta?.first ?: pid, "Не в сети", ChatType.LOCAL_LAN, isOnline = false, unreadCount = unreadCounts[cid] ?: 0, avatarColorIndex = (idx + 2) % 3, serverName = meta?.second))
             }
         }
     }
 
     fun sendToAi(promptText: String, replyTo: ReplyPreview?, attachment: AttachmentInfo?) {
         if (isAiGenerating) return
-
         val effectiveText = promptText.ifBlank { attachment?.let { "Прикреплён файл: ${it.name}" }.orEmpty() }
-        upsertMessage(
-            CHAT_ID_AI,
-            ChatMessage(
-                chatId = CHAT_ID_AI,
-                senderName = nickname,
-                text = promptText,
-                isFromMe = true,
-                replyTo = replyTo,
-                attachment = attachment
-            )
-        )
+        val userMsgId = UUID.randomUUID().toString()
+        upsertMessage(CHAT_ID_AI, ChatMessage(id = userMsgId, chatId = CHAT_ID_AI, senderName = nickname, text = promptText, isFromMe = true, replyTo = replyTo, attachment = attachment))
 
         val normalized = effectiveText.trim().lowercase().trimEnd('!', '.', '?')
         if (normalized == "инструкция" || normalized == "/help" || normalized == "помощь") {
-            upsertMessage(
-                CHAT_ID_AI,
-                ChatMessage(chatId = CHAT_ID_AI, senderName = "Volt AI", text = VOLT_AI_GUIDE_TEXT, isFromMe = false)
-            )
+            upsertMessage(CHAT_ID_AI, ChatMessage(chatId = CHAT_ID_AI, senderName = "Volt AI", text = VOLT_AI_GUIDE_TEXT, isFromMe = false))
             return
         }
 
         val replyId = UUID.randomUUID().toString()
-        upsertMessage(
-            CHAT_ID_AI,
-            ChatMessage(id = replyId, chatId = CHAT_ID_AI, senderName = "Volt AI", text = "Печатает...", isFromMe = false)
-        )
+        upsertMessage(CHAT_ID_AI, ChatMessage(id = replyId, chatId = CHAT_ID_AI, senderName = "Volt AI", text = "Печатает...", isFromMe = false))
         isAiGenerating = true
 
-        val history = (messagesByChat[CHAT_ID_AI] ?: emptyList())
-            .filter { !it.isMediaDemo && it.id != replyId && it.text != VOLT_AI_GUIDE_TEXT && it.text.isNotBlank() }
-            .takeLast(12)
-            .map { AiChatMessage(if (it.isFromMe) "user" else "assistant", it.text) }
-
         aiJob = scope.launch {
+            // Если прикрепили картинку — сначала копируем её локально для base64
+            var readyImagePath: String? = null
+            if (attachment != null && attachment.isImage) {
+                val localAtt = storage.copyUriToLocal(attachment)
+                updateTransferProgress(CHAT_ID_AI, userMsgId, null, null, localAtt)
+                readyImagePath = localAtt.localPath
+            }
+
+            val history = (messagesByChat[CHAT_ID_AI] ?: emptyList())
+                .filter { !it.isMediaDemo && it.id != replyId && it.text != VOLT_AI_GUIDE_TEXT && (it.text.isNotBlank() || it.id == userMsgId) }
+                .takeLast(12)
+                .map { msg ->
+                    AiChatMessage(
+                        role = if (msg.isFromMe) "user" else "assistant",
+                        content = msg.text.ifBlank { "Опиши это изображение." },
+                        imagePath = if (msg.id == userMsgId) readyImagePath else null
+                    )
+                }
+
             val buffer = StringBuilder()
             var lastUiUpdate = 0L
 
-            VoltAiClient.streamCompletion(history)
+            VoltAiClient.streamCompletion(history, themeConfig.aiSystemPrompt)
                 .catch {
                     buffer.append("Нет связи с сервером Volt AI (127.0.0.1:8080). Открой Volt AI и включи сервер, или напиши «инструкция».")
                     updateMessageText(CHAT_ID_AI, replyId, buffer.toString())
@@ -394,18 +364,16 @@ fun VoltMessengerApp() {
         }
     }
 
-    val currentChat = allChats.firstOrNull { it.id == activeChatId }
-
-    BackHandler(enabled = currentChat != null && callState.status == CallStatus.IDLE) {
-        activeChatId = null
+    BackHandler(enabled = route !is AppRoute.List && callState.status == CallStatus.IDLE) {
+        route = AppRoute.List
     }
 
     Box(modifier = Modifier.fillMaxSize()) {
         AnimatedContent(
-            targetState = currentChat,
+            targetState = route,
             transitionSpec = {
                 val springSpec = spring<IntOffset>(dampingRatio = 0.92f, stiffness = 420f)
-                if (targetState != null) {
+                if (targetState !is AppRoute.List) {
                     (slideInHorizontally(springSpec) { it } + fadeIn(tween(180))) togetherWith
                         (slideOutHorizontally(springSpec) { -it / 5 } + fadeOut(tween(160)))
                 } else {
@@ -413,159 +381,144 @@ fun VoltMessengerApp() {
                         (slideOutHorizontally(springSpec) { it } + fadeOut(tween(160)))
                 }
             },
-            label = "screenNav"
-        ) { chat ->
-            if (chat == null) {
-                ChatListScreen(
-                    chats = allChats,
-                    messagesByChat = messagesByChat,
-                    aiStatus = aiStatus,
-                    isLanActive = isLanActive,
-                    lanIp = lanIp,
-                    lanPort = lanPort,
-                    lanPeers = lanPeers,
-                    nickname = nickname,
-                    serverName = serverName,
-                    fingerprintEmojis = fingerprint,
-                    onIdentityChange = { newNick, newServer ->
-                        nickname = newNick
-                        serverName = newServer
-                        storage.setNickname(newNick)
-                        storage.setServerName(newServer)
-                        lanMessenger.updateIdentity(newNick, newServer)
-                    },
-                    onAddManualPeer = { ip, port ->
-                        lanMessenger.addManualPeer(ip, port)
-                    },
-                    onChatClick = { clicked ->
-                        unreadCounts[clicked.id] = 0
-                        activeChatId = clicked.id
-                    },
-                    onOpenAiClick = {
-                        unreadCounts[CHAT_ID_AI] = 0
-                        activeChatId = CHAT_ID_AI
-                    },
-                    onOpenSavedClick = {
-                        unreadCounts[CHAT_ID_SAVED] = 0
-                        activeChatId = CHAT_ID_SAVED
-                    }
-                )
-            } else {
-                ChatScreen(
-                    chat = chat,
-                    messages = messagesByChat[chat.id] ?: emptyList(),
-                    aiStatus = aiStatus,
-                    isAiGenerating = isAiGenerating,
-                    voicePlayback = voicePlayback,
-                    onBack = { activeChatId = null },
-                    onPickAttachmentMeta = { uri -> storage.readAttachmentMeta(uri) },
-                    onStartVoiceRecord = { voiceManager.startRecording() },
-                    onStopVoiceRecord = { discard ->
-                        val res = voiceManager.stopRecording(discard)
-                        if (res != null) {
-                            val (file, sec) = res
-                            AttachmentInfo(
-                                name = file.name,
-                                localPath = file.absolutePath,
-                                mimeType = "audio/mp4",
-                                sizeBytes = file.length(),
-                                isVoice = true,
-                                durationSec = sec
-                            )
-                        } else null
-                    },
-                    onToggleVoicePlay = { msgId, path -> voiceManager.togglePlay(msgId, path) },
-                    onSeekVoice = { msgId, frac -> voiceManager.seekTo(msgId, frac) },
-                    onStartAudioCall = {
-                        val peer = lanPeers.firstOrNull { "lan_${it.id}" == chat.id }
-                        if (peer != null) lanMessenger.startCall(peer)
-                    },
-                    onSendMessage = { text, reply, attachment ->
-                        when (chat.type) {
-                            ChatType.AI -> sendToAi(text, reply, attachment)
+            label = "appNav"
+        ) { currentRoute ->
+            when (currentRoute) {
+                is AppRoute.List -> {
+                    ChatListScreen(
+                        chats = allChats,
+                        messagesByChat = messagesByChat,
+                        aiStatus = aiStatus,
+                        isLanActive = isLanActive,
+                        lanIp = lanIp,
+                        lanPort = lanPort,
+                        lanPeers = lanPeers,
+                        nickname = nickname,
+                        serverName = serverName,
+                        fingerprintEmojis = fingerprint,
+                        onIdentityChange = { newNick, newServer ->
+                            nickname = newNick
+                            serverName = newServer
+                            storage.setNickname(newNick)
+                            storage.setServerName(newServer)
+                            lanMessenger.updateIdentity(newNick, newServer)
+                        },
+                        onAddManualPeer = { ip, port -> lanMessenger.addManualPeer(ip, port) },
+                        onCreateGroup = { name ->
+                            val gid = UUID.randomUUID().toString().take(8)
+                            knownGroups[gid] = name
+                            storage.saveKnownGroup(gid, name)
+                            route = AppRoute.Chat("grp_$gid")
+                        },
+                        onOpenSettings = { route = AppRoute.Settings },
+                        onChatClick = { clicked -> unreadCounts[clicked.id] = 0; route = AppRoute.Chat(clicked.id) },
+                        onOpenAiClick = { unreadCounts[CHAT_ID_AI] = 0; route = AppRoute.Chat(CHAT_ID_AI) },
+                        onOpenSavedClick = { unreadCounts[CHAT_ID_SAVED] = 0; route = AppRoute.Chat(CHAT_ID_SAVED) }
+                    )
+                }
 
-                            ChatType.SAVED -> {
-                                val msgId = UUID.randomUUID().toString()
-                                upsertMessage(
-                                    chat.id,
-                                    ChatMessage(
-                                        id = msgId,
-                                        chatId = chat.id,
-                                        senderName = nickname,
-                                        text = text,
-                                        isFromMe = true,
-                                        replyTo = reply,
-                                        attachment = attachment
-                                    )
-                                )
-                                if (attachment != null && attachment.localPath.isEmpty()) {
-                                    scope.launch {
-                                        val copied = storage.copyUriToLocal(attachment)
-                                        updateTransferProgress(chat.id, msgId, null, null, copied)
-                                    }
+                is AppRoute.Settings -> {
+                    SettingsScreen(
+                        config = themeConfig,
+                        onConfigChange = onThemeConfigChange,
+                        onBack = { route = AppRoute.List }
+                    )
+                }
+
+                is AppRoute.Chat -> {
+                    val chat = allChats.firstOrNull { it.id == currentRoute.chatId }
+                    if (chat == null) {
+                        route = AppRoute.List
+                    } else {
+                        ChatScreen(
+                            chat = chat,
+                            messages = messagesByChat[chat.id] ?: emptyList(),
+                            aiStatus = aiStatus,
+                            isAiGenerating = isAiGenerating,
+                            voicePlayback = voicePlayback,
+                            aiSystemPrompt = themeConfig.aiSystemPrompt,
+                            onBack = { route = AppRoute.List },
+                            onPickAttachmentMeta = { uri -> storage.readAttachmentMeta(uri) },
+                            onStartVoiceRecord = { voiceManager.startRecording() },
+                            onStopVoiceRecord = { discard ->
+                                voiceManager.stopRecording(discard)?.let { (file, sec) ->
+                                    AttachmentInfo(file.name, file.absolutePath, "audio/mp4", file.length(), isVoice = true, durationSec = sec)
                                 }
-                            }
+                            },
+                            onToggleVoicePlay = { msgId, path -> voiceManager.togglePlay(msgId, path) },
+                            onSeekVoice = { msgId, frac -> voiceManager.seekTo(msgId, frac) },
+                            onStartAudioCall = {
+                                lanPeers.firstOrNull { "lan_${it.id}" == chat.id }?.let { lanMessenger.startCall(it) }
+                            },
+                            onSendMessage = { text, reply, attachment ->
+                                when (chat.type) {
+                                    ChatType.AI -> sendToAi(text, reply, attachment)
 
-                            ChatType.LOCAL_LAN -> {
-                                val peer = lanPeers.firstOrNull { "lan_${it.id}" == chat.id }
-                                val msgId = UUID.randomUUID().toString()
-                                upsertMessage(
-                                    chat.id,
-                                    ChatMessage(
-                                        id = msgId,
-                                        chatId = chat.id,
-                                        senderName = nickname,
-                                        text = text,
-                                        isFromMe = true,
-                                        replyTo = reply,
-                                        attachment = attachment,
-                                        transferProgress = if (attachment != null) 0f else null,
-                                        isEncrypted = true
-                                    )
-                                )
-
-                                if (peer == null) {
-                                    Toast.makeText(context, "Собеседник сейчас не в сети", Toast.LENGTH_SHORT).show()
-                                    updateTransferProgress(chat.id, msgId, null, null)
-                                    return@ChatScreen
-                                }
-
-                                scope.launch {
-                                    if (attachment != null) {
-                                        val ok = lanMessenger.sendFileMessage(peer, text, attachment) { p, mbps ->
+                                    ChatType.SAVED -> {
+                                        val msgId = UUID.randomUUID().toString()
+                                        upsertMessage(chat.id, ChatMessage(id = msgId, chatId = chat.id, senderName = nickname, text = text, isFromMe = true, replyTo = reply, attachment = attachment))
+                                        if (attachment != null && attachment.localPath.isEmpty()) {
                                             scope.launch {
-                                                updateTransferProgress(chat.id, msgId, if (p >= 1f) null else p, mbps)
+                                                val copied = storage.copyUriToLocal(attachment)
+                                                updateTransferProgress(chat.id, msgId, null, null, copied)
                                             }
                                         }
-                                        updateTransferProgress(chat.id, msgId, null, null)
-                                        if (!ok) {
-                                            Toast.makeText(context, "Ошибка передачи файла", Toast.LENGTH_SHORT).show()
+                                    }
+
+                                    ChatType.LOCAL_LAN -> {
+                                        val peer = lanPeers.firstOrNull { "lan_${it.id}" == chat.id }
+                                        val msgId = UUID.randomUUID().toString()
+                                        upsertMessage(chat.id, ChatMessage(id = msgId, chatId = chat.id, senderName = nickname, text = text, isFromMe = true, replyTo = reply, attachment = attachment, transferProgress = if (attachment != null) 0f else null, isEncrypted = true))
+                                        if (peer == null) {
+                                            Toast.makeText(context, "Собеседник не в сети", Toast.LENGTH_SHORT).show()
+                                            updateTransferProgress(chat.id, msgId, null, null)
+                                            return@ChatScreen
                                         }
-                                    } else {
-                                        val ok = lanMessenger.sendTextMessage(peer, text)
-                                        if (!ok) {
-                                            Toast.makeText(context, "Не удалось доставить сообщение", Toast.LENGTH_SHORT).show()
+                                        scope.launch {
+                                            if (attachment != null) {
+                                                val ok = lanMessenger.sendFileMessage(peer, text, attachment) { p, mbps ->
+                                                    scope.launch { updateTransferProgress(chat.id, msgId, if (p >= 1f) null else p, mbps) }
+                                                }
+                                                updateTransferProgress(chat.id, msgId, null, null)
+                                                if (!ok) Toast.makeText(context, "Ошибка передачи файла", Toast.LENGTH_SHORT).show()
+                                            } else {
+                                                if (!lanMessenger.sendTextMessage(peer, text)) Toast.makeText(context, "Не удалось доставить", Toast.LENGTH_SHORT).show()
+                                            }
+                                        }
+                                    }
+
+                                    ChatType.GROUP_LAN -> {
+                                        val groupId = chat.id.removePrefix("grp_")
+                                        val msgId = UUID.randomUUID().toString()
+                                        upsertMessage(chat.id, ChatMessage(id = msgId, chatId = chat.id, senderName = nickname, text = text, isFromMe = true, replyTo = reply, attachment = attachment, transferProgress = if (attachment != null && lanPeers.isNotEmpty()) 0f else null, isEncrypted = true))
+                                        if (lanPeers.isEmpty()) return@ChatScreen
+                                        scope.launch {
+                                            lanPeers.forEach { peer ->
+                                                if (attachment != null) {
+                                                    lanMessenger.sendFileMessage(peer, text, attachment, groupId, chat.title) { p, mbps ->
+                                                        scope.launch { updateTransferProgress(chat.id, msgId, if (p >= 1f) null else p, mbps) }
+                                                    }
+                                                } else {
+                                                    lanMessenger.sendTextMessage(peer, text, groupId, chat.title)
+                                                }
+                                            }
+                                            updateTransferProgress(chat.id, msgId, null, null)
                                         }
                                     }
                                 }
-                            }
-                        }
-                    },
-                    onStopAi = {
-                        aiJob?.cancel()
-                        isAiGenerating = false
-                    },
-                    onDeleteMessage = { msg ->
-                        val current = messagesByChat[chat.id] ?: emptyList()
-                        messagesByChat[chat.id] = current.filterNot { it.id == msg.id }
-                        persistAll()
-                    },
-                    onOpenVoltAi = { VoltAiClient.launchVoltAi(context) }
-                )
+                            },
+                            onStopAi = { aiJob?.cancel(); isAiGenerating = false },
+                            onDeleteMessage = { msg ->
+                                messagesByChat[chat.id] = (messagesByChat[chat.id] ?: emptyList()).filterNot { it.id == msg.id }
+                                persistAll()
+                            },
+                            onOpenVoltAi = { VoltAiClient.launchVoltAi(context) }
+                        )
+                    }
+                }
             }
         }
 
-        // Полноэкранный экран входящего / активного зашифрованного аудиозвонка
         AnimatedVisibility(
             visible = callState.status != CallStatus.IDLE,
             enter = slideInVertically(spring(dampingRatio = 0.88f, stiffness = 400f)) { it } + fadeIn(tween(180)),

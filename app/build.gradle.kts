@@ -4,6 +4,8 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
+val buildNum = (project.findProperty("buildNumber") as String?)?.toIntOrNull() ?: 5
+
 android {
     namespace = "com.voltage.messenger"
     compileSdk = 35
@@ -12,8 +14,8 @@ android {
         applicationId = "com.voltage.messenger"
         minSdk = 26
         targetSdk = 35
-        versionCode = 3
-        versionName = "0.3.0"
+        versionCode = buildNum
+        versionName = "0.5.$buildNum"
     }
 
     buildTypes {
@@ -36,6 +38,7 @@ android {
 
     buildFeatures {
         compose = true
+        buildConfig = true
     }
 }
 
