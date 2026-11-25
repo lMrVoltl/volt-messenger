@@ -13,6 +13,7 @@ import com.voltage.messenger.model.AttachmentInfo
 import com.voltage.messenger.model.ChannelMeta
 import com.voltage.messenger.model.ChatMessage
 import com.voltage.messenger.model.DEFAULT_AI_SYSTEM_PROMPT
+import com.voltage.messenger.model.PollData
 import com.voltage.messenger.model.ReplyPreview
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -41,10 +42,7 @@ class ChatStorage(private val context: Context) {
 
     fun getShortId(): String = getDeviceId().take(6)
 
-    fun getNickname(): String {
-        return prefs.getString("nickname", null)
-            ?: Build.MODEL.take(16).ifBlank { "Volt User" }
-    }
+    fun getNickname(): String = prefs.getString("nickname", null) ?: Build.MODEL.take(16).ifBlank { "Volt User" }
 
     fun setNickname(name: String) {
         val clean = name.trim().take(24)
@@ -99,22 +97,17 @@ class ChatStorage(private val context: Context) {
             val cr = context.contentResolver
             var displayName = "file_${System.currentTimeMillis()}"
             var sizeBytes = 0L
-
             cr.query(uri, null, null, null, null)?.use { cursor ->
                 if (cursor.moveToFirst()) {
                     val nameIdx = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                     val sizeIdx = cursor.getColumnIndex(OpenableColumns.SIZE)
-                    if (nameIdx >= 0) {
-                        cursor.getString(nameIdx)?.takeIf { it.isNotBlank() }?.let { displayName = it }
-                    }
+                    if (nameIdx >= 0) cursor.getString(nameIdx)?.takeIf { it.isNotBlank() }?.let { displayName = it }
                     if (sizeIdx >= 0) sizeBytes = cursor.getLong(sizeIdx)
                 }
             }
             val mime = cr.getType(uri) ?: "application/octet-stream"
             AttachmentInfo(displayName, "", mime, sizeBytes, uriString = uri.toString())
-        } catch (_: Exception) {
-            null
-        }
+        } catch (_: Exception) { null }
     }
 
     suspend fun copyUriToLocal(info: AttachmentInfo): AttachmentInfo = withContext(Dispatchers.IO) {
@@ -152,8 +145,7 @@ class ChatStorage(private val context: Context) {
             resolver.openOutputStream(uri)?.use { out ->
                 sourceFile.inputStream().use { inp -> inp.copyTo(out, 256 * 1024) }
             }
-        } catch (_: Exception) {
-        }
+        } catch (_: Exception) {}
     }
 
     fun saveKnownPeerName(peerId: String, nickname: String, serverName: String) {
@@ -227,10 +219,8 @@ class ChatStorage(private val context: Context) {
     fun savePins(pinnedChats: Set<String>, pinnedMessages: Map<String, String>) {
         try {
             val root = JSONObject()
-            val chatsArr = JSONArray()
-            pinnedChats.forEach { chatsArr.put(it) }
-            val msgsObj = JSONObject()
-            pinnedMessages.forEach { (k, v) -> msgsObj.put(k, v) }
+            val chatsArr = JSONArray().apply { pinnedChats.forEach { put(it) } }
+            val msgsObj = JSONObject().apply { pinnedMessages.forEach { (k, v) -> put(k, v) } }
             root.put("chats", chatsArr)
             root.put("messages", msgsObj)
             pinsFile.writeText(root.toString())
@@ -242,23 +232,14 @@ class ChatStorage(private val context: Context) {
         return try {
             val root = JSONObject(pinsFile.readText())
             val chats = mutableSetOf<String>()
-            val cArr = root.optJSONArray("chats")
-            if (cArr != null) {
-                for (i in 0 until cArr.length()) chats.add(cArr.optString(i))
-            }
+            root.optJSONArray("chats")?.let { a -> for (i in 0 until a.length()) chats.add(a.optString(i)) }
             val msgs = mutableMapOf<String, String>()
-            val mObj = root.optJSONObject("messages")
-            if (mObj != null) {
-                val keys = mObj.keys()
-                while (keys.hasNext()) {
-                    val k = keys.next()
-                    msgs[k] = mObj.optString(k)
-                }
+            root.optJSONObject("messages")?.let { o ->
+                val keys = o.keys()
+                while (keys.hasNext()) { val k = keys.next(); msgs[k] = o.optString(k) }
             }
             chats to msgs
-        } catch (_: Exception) {
-            emptySet<String>() to emptyMap()
-        }
+        } catch (_: Exception) { emptySet<String>() to emptyMap() }
     }
 
     fun loadMessages(): MutableMap<String, MutableList<ChatMessage>> {
@@ -273,37 +254,29 @@ class ChatStorage(private val context: Context) {
                 val list = mutableListOf<ChatMessage>()
                 for (i in 0 until arr.length()) {
                     val o = arr.optJSONObject(i) ?: continue
-                    val replyObj = o.optJSONObject("replyTo")
-                    val reply = if (replyObj != null) ReplyPreview(replyObj.optString("senderName"), replyObj.optString("text")) else null
-
-                    val attObj = o.optJSONObject("attachment")
-                    val att = if (attObj != null) {
-                        AttachmentInfo(
-                            name = attObj.optString("name"),
-                            localPath = attObj.optString("localPath"),
-                            mimeType = attObj.optString("mimeType", "application/octet-stream"),
-                            sizeBytes = attObj.optLong("sizeBytes", 0L),
-                            isVoice = attObj.optBoolean("isVoice", false),
-                            durationSec = attObj.optInt("durationSec", 0)
-                        )
-                    } else null
-
+                    val reply = o.optJSONObject("replyTo")?.let { ReplyPreview(it.optString("senderName"), it.optString("text")) }
+                    val att = o.optJSONObject("attachment")?.let {
+                        AttachmentInfo(it.optString("name"), it.optString("localPath"), it.optString("mimeType", "application/octet-stream"), it.optLong("sizeBytes", 0L), isVoice = it.optBoolean("isVoice", false), durationSec = it.optInt("durationSec", 0))
+                    }
+                    val poll = o.optJSONObject("poll")?.let { pObj ->
+                        val opts = mutableListOf<String>()
+                        pObj.optJSONArray("options")?.let { oa -> for (k in 0 until oa.length()) opts.add(oa.optString(k)) }
+                        val votes = mutableMapOf<Int, Int>()
+                        pObj.optJSONObject("votes")?.let { vo ->
+                            val vk = vo.keys()
+                            while (vk.hasNext()) { val idx = vk.next().toIntOrNull() ?: continue; votes[idx] = vo.optInt(idx.toString(), 0) }
+                        }
+                        val myV = mutableSetOf<Int>()
+                        pObj.optJSONArray("myVotes")?.let { ma -> for (k in 0 until ma.length()) myV.add(ma.optInt(k)) }
+                        PollData(pObj.optString("question"), opts, votes, myV, pObj.optBoolean("isAnonymous", true), pObj.optBoolean("allowsMultiple", false))
+                    }
                     val reactionsMap = mutableMapOf<String, Int>()
                     o.optJSONObject("reactions")?.let { rObj ->
                         val rk = rObj.keys()
-                        while (rk.hasNext()) {
-                            val e = rk.next()
-                            val cnt = rObj.optInt(e, 0)
-                            if (cnt > 0) reactionsMap[e] = cnt
-                        }
+                        while (rk.hasNext()) { val e = rk.next(); val cnt = rObj.optInt(e, 0); if (cnt > 0) reactionsMap[e] = cnt }
                     }
-
                     val myReactionsSet = mutableSetOf<String>()
-                    o.optJSONArray("myReactions")?.let { mArr ->
-                        for (j in 0 until mArr.length()) {
-                            myReactionsSet.add(mArr.optString(j))
-                        }
-                    }
+                    o.optJSONArray("myReactions")?.let { mArr -> for (j in 0 until mArr.length()) myReactionsSet.add(mArr.optString(j)) }
 
                     val ts = o.optLong("timestamp", System.currentTimeMillis())
                     list.add(
@@ -319,6 +292,7 @@ class ChatStorage(private val context: Context) {
                             isMediaDemo = o.optBoolean("isMediaDemo", false),
                             replyTo = reply,
                             attachment = att,
+                            poll = poll,
                             isEncrypted = o.optBoolean("isEncrypted", false),
                             reactions = reactionsMap,
                             myReactions = myReactionsSet
@@ -346,30 +320,25 @@ class ChatStorage(private val context: Context) {
                         .put("isRead", msg.isRead)
                         .put("isMediaDemo", msg.isMediaDemo)
                         .put("isEncrypted", msg.isEncrypted)
-                    if (msg.replyTo != null) {
-                        o.put("replyTo", JSONObject().put("senderName", msg.replyTo.senderName).put("text", msg.replyTo.text))
+                    msg.replyTo?.let { o.put("replyTo", JSONObject().put("senderName", it.senderName).put("text", it.text)) }
+                    msg.attachment?.let {
+                        o.put("attachment", JSONObject().put("name", it.name).put("localPath", it.localPath).put("mimeType", it.mimeType).put("sizeBytes", it.sizeBytes).put("isVoice", it.isVoice).put("durationSec", it.durationSec))
                     }
-                    if (msg.attachment != null) {
-                        o.put(
-                            "attachment",
-                            JSONObject()
-                                .put("name", msg.attachment.name)
-                                .put("localPath", msg.attachment.localPath)
-                                .put("mimeType", msg.attachment.mimeType)
-                                .put("sizeBytes", msg.attachment.sizeBytes)
-                                .put("isVoice", msg.attachment.isVoice)
-                                .put("durationSec", msg.attachment.durationSec)
-                        )
+                    msg.poll?.let { p ->
+                        val pObj = JSONObject()
+                            .put("question", p.question)
+                            .put("options", JSONArray().apply { p.options.forEach { put(it) } })
+                            .put("votes", JSONObject().apply { p.votes.forEach { (k, v) -> if (v > 0) put(k.toString(), v) } })
+                            .put("myVotes", JSONArray().apply { p.myVotes.forEach { put(it) } })
+                            .put("isAnonymous", p.isAnonymous)
+                            .put("allowsMultiple", p.allowsMultiple)
+                        o.put("poll", pObj)
                     }
                     if (msg.reactions.isNotEmpty()) {
-                        val rObj = JSONObject()
-                        msg.reactions.forEach { (e, c) -> if (c > 0) rObj.put(e, c) }
-                        o.put("reactions", rObj)
+                        o.put("reactions", JSONObject().apply { msg.reactions.forEach { (e, c) -> if (c > 0) put(e, c) } })
                     }
                     if (msg.myReactions.isNotEmpty()) {
-                        val mArr = JSONArray()
-                        msg.myReactions.forEach { mArr.put(it) }
-                        o.put("myReactions", mArr)
+                        o.put("myReactions", JSONArray().apply { msg.myReactions.forEach { put(it) } })
                     }
                     arr.put(o)
                 }

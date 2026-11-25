@@ -76,12 +76,12 @@ private val VOLT_AI_GUIDE_TEXT = """
 📘 Как пользоваться локальным ИИ (Volt AI)
 
 1. Настройка в приложении Volt AI:
-• Установи приложение Volt AI и скачай хотя бы одну языковую модель (или прими файл .gguf от друга прямо в этом мессенджере — он сам попадёт в папку VoltModels).
+• Установи приложение Volt AI и скачай хотя бы одну языковую модель (или прими файл .gguf от друга прямо здесь — он сам сохранится в папку VoltModels).
 • Загрузи модель в память и включи локальный сервер в настройках Volt AI.
 
 2. Возможности в Volt Messenger:
-• Общение и анализ фото прямо в этом чате.
-• Управление мессенджером текстом: просто напиши «измени ник на ...», «включи светлую тему», «создай канал ...» или «открой настройки».
+• Пиши вопросы или прикрепляй фото (скрепка).
+• Управляй приложением текстом: напиши «измени ник на ...», «включи светлую тему», «создай канал ...» или «открой настройки».
 • В любом другом чате нажми коротким тапом на сообщение → «Спросить у Volt AI».
 
 💡 Напиши слово «инструкция», чтобы открыть эту памятку снова.
@@ -101,15 +101,11 @@ class MainActivity : ComponentActivity() {
         setContent {
             val storage = remember { ChatStorage(this) }
             var themeConfig by remember { mutableStateOf(storage.loadThemeConfig()) }
-
             VoltMessengerTheme(config = themeConfig) {
                 VoltMessengerApp(
                     storage = storage,
                     themeConfig = themeConfig,
-                    onThemeConfigChange = {
-                        themeConfig = it
-                        storage.saveThemeConfig(it)
-                    }
+                    onThemeConfigChange = { themeConfig = it; storage.saveThemeConfig(it) }
                 )
             }
         }
@@ -118,14 +114,9 @@ class MainActivity : ComponentActivity() {
     private fun unlockHighRefreshRate() {
         try {
             val modes = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) display?.supportedModes
-            else {
-                @Suppress("DEPRECATION")
-                windowManager.defaultDisplay?.supportedModes
-            }
+            else { @Suppress("DEPRECATION") windowManager.defaultDisplay?.supportedModes }
             val maxRate = modes?.maxOfOrNull { it.refreshRate } ?: return
-            val lp = window.attributes
-            lp.preferredRefreshRate = maxRate
-            window.attributes = lp
+            val lp = window.attributes; lp.preferredRefreshRate = maxRate; window.attributes = lp
         } catch (_: Exception) {}
     }
 }
@@ -161,28 +152,20 @@ fun VoltMessengerApp(
 
     val initialPins = remember { storage.loadPins() }
     var pinnedChats by remember {
-        mutableStateOf(
-            if (initialPins.first.isEmpty()) setOf(CHAT_ID_SAVED, CHAT_ID_AI, "grp_$GROUP_ID_ROOM_ALL")
-            else initialPins.first
-        )
+        mutableStateOf(if (initialPins.first.isEmpty()) setOf(CHAT_ID_SAVED, CHAT_ID_AI, "grp_$GROUP_ID_ROOM_ALL") else initialPins.first)
     }
     val pinnedMessages = remember { mutableStateMapOf<String, String>().apply { putAll(initialPins.second) } }
 
     val unreadCounts = remember { mutableStateMapOf<String, Int>() }
     val knownPeers = remember { mutableStateMapOf<String, Pair<String, String>>().apply { putAll(storage.loadKnownPeers()) } }
-    val knownGroups = remember {
-        mutableStateMapOf<String, String>().apply {
-            put(GROUP_ID_ROOM_ALL, "Общая комната")
-            putAll(storage.loadKnownGroups())
-        }
-    }
+    val knownGroups = remember { mutableStateMapOf<String, String>().apply { put(GROUP_ID_ROOM_ALL, "Общая комната"); putAll(storage.loadKnownGroups()) } }
     val knownChannels = remember { mutableStateMapOf<String, ChannelMeta>().apply { putAll(storage.loadChannels()) } }
 
     val messagesByChat = remember {
         mutableStateMapOf<String, List<ChatMessage>>().apply {
             storage.loadMessages().forEach { (k, v) -> put(k, v) }
             if (get(CHAT_ID_SAVED).isNullOrEmpty()) {
-                put(CHAT_ID_SAVED, listOf(ChatMessage(chatId = CHAT_ID_SAVED, senderName = "Избранное", text = "Личное пространство для заметок, файлов и голосовых.", isFromMe = false)))
+                put(CHAT_ID_SAVED, listOf(ChatMessage(chatId = CHAT_ID_SAVED, senderName = "Избранное", text = "Личное пространство для заметок, файлов, опросов и голосовых.", isFromMe = false)))
             }
             if (get(CHAT_ID_AI).isNullOrEmpty()) {
                 put(CHAT_ID_AI, listOf(ChatMessage(chatId = CHAT_ID_AI, senderName = "Volt AI", text = VOLT_AI_GUIDE_TEXT, isFromMe = false)))
@@ -197,15 +180,11 @@ fun VoltMessengerApp(
         val current = messagesByChat[chatId] ?: emptyList()
         val idx = current.indexOfFirst { it.id == msg.id }
         if (idx >= 0) {
-            val copy = current.toMutableList()
-            copy[idx] = msg
-            messagesByChat[chatId] = copy
+            val copy = current.toMutableList(); copy[idx] = msg; messagesByChat[chatId] = copy
         } else {
             messagesByChat[chatId] = current + msg
             val activeChat = (route as? AppRoute.Chat)?.chatId
-            if (countUnread && activeChat != chatId && !msg.isFromMe) {
-                unreadCounts[chatId] = (unreadCounts[chatId] ?: 0) + 1
-            }
+            if (countUnread && activeChat != chatId && !msg.isFromMe) unreadCounts[chatId] = (unreadCounts[chatId] ?: 0) + 1
         }
         if (msg.transferProgress == null) persistAll()
     }
@@ -218,6 +197,20 @@ fun VoltMessengerApp(
                 val next = ((updated[emoji] ?: 0) + delta).coerceAtLeast(0)
                 if (next == 0) updated.remove(emoji) else updated[emoji] = next
                 m.copy(reactions = updated)
+            } else m
+        }
+        persistAll()
+    }
+
+    fun applyRemotePollVote(chatId: String, msgId: String, optionIndex: Int, delta: Int) {
+        val list = messagesByChat[chatId] ?: return
+        messagesByChat[chatId] = list.map { m ->
+            val p = m.poll
+            if (m.id == msgId && p != null) {
+                val updated = p.votes.toMutableMap()
+                val next = ((updated[optionIndex] ?: 0) + delta).coerceAtLeast(0)
+                if (next == 0) updated.remove(optionIndex) else updated[optionIndex] = next
+                m.copy(poll = p.copy(votes = updated))
             } else m
         }
         persistAll()
@@ -247,8 +240,7 @@ fun VoltMessengerApp(
                 scope.launch {
                     val chatId = when {
                         ev.channelId != null -> {
-                            val meta = ChannelMeta(ev.channelId, ev.channelName ?: knownChannels[ev.channelId]?.title ?: "Канал", ev.channelOwnerId ?: ev.peerId)
-                            knownChannels[ev.channelId] = meta
+                            knownChannels[ev.channelId] = ChannelMeta(ev.channelId, ev.channelName ?: knownChannels[ev.channelId]?.title ?: "Канал", ev.channelOwnerId ?: ev.peerId)
                             "ch_${ev.channelId}"
                         }
                         ev.groupId != null -> {
@@ -261,10 +253,10 @@ fun VoltMessengerApp(
                         }
                     }
 
-                    if (ev.reactionEmoji != null) {
-                        applyRemoteReaction(chatId, ev.messageId, ev.reactionEmoji, ev.reactionDelta)
-                    } else {
-                        upsertMessage(
+                    when {
+                        ev.reactionEmoji != null -> applyRemoteReaction(chatId, ev.messageId, ev.reactionEmoji, ev.reactionDelta)
+                        ev.pollVoteOption != null -> applyRemotePollVote(chatId, ev.messageId, ev.pollVoteOption, ev.pollVoteDelta)
+                        else -> upsertMessage(
                             chatId = chatId,
                             msg = ChatMessage(
                                 id = ev.messageId,
@@ -274,6 +266,7 @@ fun VoltMessengerApp(
                                 isFromMe = false,
                                 timestamp = ev.timestamp,
                                 attachment = ev.attachment,
+                                poll = ev.poll,
                                 transferProgress = ev.progress,
                                 transferSpeedMbps = ev.speedMbps,
                                 isEncrypted = ev.isEncrypted
@@ -303,19 +296,15 @@ fun VoltMessengerApp(
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) {
-                scope.launch { aiStatus = VoltAiClient.checkStatus(context) }
-            }
+            if (event == Lifecycle.Event.ON_RESUME) scope.launch { aiStatus = VoltAiClient.checkStatus(context) }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
     }
 
     fun updateIdentity(newNick: String, newServer: String) {
-        nickname = newNick
-        serverName = newServer
-        storage.setNickname(newNick)
-        storage.setServerName(newServer)
+        nickname = newNick; serverName = newServer
+        storage.setNickname(newNick); storage.setServerName(newServer)
         lanMessenger.updateIdentity(newNick, newServer)
     }
 
@@ -323,25 +312,21 @@ fun VoltMessengerApp(
         buildList {
             add(ChatRoom(CHAT_ID_SAVED, "Избранное", "Заметки, файлы и голосовые", ChatType.SAVED, isPinned = CHAT_ID_SAVED in pinnedChats, unreadCount = unreadCounts[CHAT_ID_SAVED] ?: 0, avatarColorIndex = 0))
             add(ChatRoom(CHAT_ID_AI, "Volt AI", "Локальная нейросеть", ChatType.AI, isOnline = aiStatus == VoltAiStatus.READY, isPinned = CHAT_ID_AI in pinnedChats, unreadCount = unreadCounts[CHAT_ID_AI] ?: 0, avatarColorIndex = 1))
-
             knownGroups.forEach { (gid, gname) ->
                 val cid = "grp_$gid"
                 add(ChatRoom(cid, gname, "Локальная группа • в сети: ${lanPeers.size + 1}", ChatType.GROUP_LAN, isOnline = lanPeers.isNotEmpty(), isPinned = cid in pinnedChats, unreadCount = unreadCounts[cid] ?: 0, avatarColorIndex = 2))
             }
-
             knownChannels.values.forEach { ch ->
                 val cid = "ch_${ch.id}"
                 val isOwner = ch.ownerId == myShortId
                 add(ChatRoom(cid, ch.title, if (isOwner) "Твой канал • вещание" else "Локальный канал", ChatType.CHANNEL_LAN, isOnline = lanPeers.isNotEmpty(), isPinned = cid in pinnedChats, unreadCount = unreadCounts[cid] ?: 0, avatarColorIndex = 0, isChannelOwner = isOwner))
             }
-
             val activeIds = mutableSetOf<String>()
             lanPeers.forEachIndexed { idx, peer ->
                 val cid = "lan_${peer.id}"
                 activeIds.add(cid)
                 add(ChatRoom(cid, peer.nickname, "Сервер: ${peer.serverName} • ${peer.host}", ChatType.LOCAL_LAN, isOnline = true, isPinned = cid in pinnedChats, unreadCount = unreadCounts[cid] ?: 0, avatarColorIndex = (idx + 2) % 3, peerHost = peer.host, peerPort = peer.port, serverName = peer.serverName))
             }
-
             messagesByChat.keys.filter { it.startsWith("lan_") && it !in activeIds }.forEachIndexed { idx, cid ->
                 val pid = cid.removePrefix("lan_")
                 val meta = knownPeers[pid]
@@ -350,48 +335,29 @@ fun VoltMessengerApp(
         }
     }
 
-    fun executeAiActions(actions: List<AiAppAction>): List<String> {
-        val reports = mutableListOf<String>()
-        actions.forEach { act ->
-            when (act) {
-                is AiAppAction.SetNickname -> {
-                    updateIdentity(act.nickname, serverName)
-                    reports.add("ник изменён на «${act.nickname}»")
-                }
-                is AiAppAction.SetServerName -> {
-                    updateIdentity(nickname, act.serverName)
-                    reports.add("сервер переименован в «${act.serverName}»")
-                }
-                is AiAppAction.SetThemeMode -> {
-                    onThemeConfigChange(themeConfig.copy(themeMode = act.mode))
-                    val t = listOf("системная", "светлая", "тёмная").getOrElse(act.mode) { "" }
-                    reports.add("включена $t тема")
-                }
-                is AiAppAction.SetAccentPreset -> {
-                    onThemeConfigChange(themeConfig.copy(accentPreset = act.preset))
-                    val p = listOf("Material You", "Индиго", "Изумруд", "Аметист", "Закат").getOrElse(act.preset) { "" }
-                    reports.add("палитра изменена на «$p»")
-                }
-                is AiAppAction.CreateGroup -> {
-                    val gid = UUID.randomUUID().toString().take(8)
-                    knownGroups[gid] = act.name
-                    storage.saveKnownGroup(gid, act.name)
-                    reports.add("создана группа «${act.name}»")
-                }
-                is AiAppAction.CreateChannel -> {
-                    val chId = UUID.randomUUID().toString().take(8)
-                    val meta = ChannelMeta(chId, act.name, myShortId)
-                    knownChannels[chId] = meta
-                    storage.saveChannel(meta)
-                    reports.add("создан канал «${act.name}»")
-                }
-                is AiAppAction.OpenSettings -> {
-                    route = AppRoute.Settings
-                    reports.add("открыты настройки")
-                }
-            }
+    fun executeAiAction(act: AiAppAction): String = when (act) {
+        is AiAppAction.SetNickname -> { updateIdentity(act.nickname, serverName); "Ник изменён на «${act.nickname}»" }
+        is AiAppAction.SetServerName -> { updateIdentity(nickname, act.serverName); "Сервер переименован в «${act.serverName}»" }
+        is AiAppAction.SetThemeMode -> {
+            onThemeConfigChange(themeConfig.copy(themeMode = act.mode))
+            "Включена ${listOf("системная", "светлая", "тёмная").getOrElse(act.mode) { "" }} тема"
         }
-        return reports
+        is AiAppAction.SetAccentPreset -> {
+            onThemeConfigChange(themeConfig.copy(accentPreset = act.preset))
+            "Палитра изменена на «${listOf("Material You", "Индиго", "Изумруд", "Аметист", "Закат").getOrElse(act.preset) { "" }}»"
+        }
+        is AiAppAction.CreateGroup -> {
+            val gid = UUID.randomUUID().toString().take(8)
+            knownGroups[gid] = act.name; storage.saveKnownGroup(gid, act.name)
+            "Создана локальная группа «${act.name}»"
+        }
+        is AiAppAction.CreateChannel -> {
+            val chId = UUID.randomUUID().toString().take(8)
+            val meta = ChannelMeta(chId, act.name, myShortId)
+            knownChannels[chId] = meta; storage.saveChannel(meta)
+            "Создан локальный канал «${act.name}»"
+        }
+        is AiAppAction.OpenSettings -> { route = AppRoute.Settings; "Открыл настройки" }
     }
 
     fun sendToAi(promptText: String, replyTo: ReplyPreview?, attachment: AttachmentInfo?) {
@@ -403,6 +369,14 @@ fun VoltMessengerApp(
         val normalized = effectiveText.trim().lowercase().trimEnd('!', '.', '?')
         if (normalized == "инструкция" || normalized == "/help" || normalized == "помощь") {
             upsertMessage(CHAT_ID_AI, ChatMessage(chatId = CHAT_ID_AI, senderName = "Volt AI", text = VOLT_AI_GUIDE_TEXT, isFromMe = false))
+            return
+        }
+
+        // Мгновенное выполнение команд управления приложением (работает даже без перегрузки модели)
+        val directAction = VoltAiAssistant.detectDirectAction(effectiveText, themeConfig.aiControlEnabled)
+        if (directAction != null) {
+            val report = executeAiAction(directAction)
+            upsertMessage(CHAT_ID_AI, ChatMessage(chatId = CHAT_ID_AI, senderName = "Volt AI", text = "⚡ Готово! $report.", isFromMe = false))
             return
         }
 
@@ -418,17 +392,10 @@ fun VoltMessengerApp(
                 readyImagePath = localAtt.localPath
             }
 
-            val fullSystemPrompt = VoltAiAssistant.buildSystemPrompt(
-                basePrompt = themeConfig.aiSystemPrompt,
-                nickname = nickname,
-                serverName = serverName,
-                themeConfig = themeConfig,
-                peersOnline = lanPeers.size
-            )
-
+            val compactSystem = VoltAiAssistant.buildSystemPrompt(themeConfig.aiSystemPrompt, nickname, serverName, themeConfig, lanPeers.size)
             val history = (messagesByChat[CHAT_ID_AI] ?: emptyList())
                 .filter { !it.isMediaDemo && it.id != replyId && it.text != VOLT_AI_GUIDE_TEXT && (it.text.isNotBlank() || it.id == userMsgId) }
-                .takeLast(10)
+                .takeLast(6)
                 .map { msg ->
                     AiChatMessage(
                         role = if (msg.isFromMe) "user" else "assistant",
@@ -440,9 +407,9 @@ fun VoltMessengerApp(
             val buffer = StringBuilder()
             var lastUiUpdate = 0L
 
-            VoltAiClient.streamCompletion(history, fullSystemPrompt)
-                .catch {
-                    buffer.append("Нет связи с сервером Volt AI. Включи локальный сервер в приложении Volt AI или напиши «инструкция».")
+            VoltAiClient.streamCompletion(history, compactSystem)
+                .catch { e ->
+                    buffer.append("Нет связи с сервером Volt AI (${e.message ?: "выключен"}). Включи сервер в приложении Volt AI.")
                     updateMessageText(CHAT_ID_AI, replyId, buffer.toString())
                     aiStatus = VoltAiStatus.SERVER_OFFLINE
                 }
@@ -450,240 +417,225 @@ fun VoltMessengerApp(
                     buffer.append(chunk)
                     val now = System.currentTimeMillis()
                     if (now - lastUiUpdate >= 35L) {
-                        val preview = buffer.toString().substringBefore("[[CMD:")
-                        if (preview.isNotBlank()) updateMessageText(CHAT_ID_AI, replyId, preview)
+                        updateMessageText(CHAT_ID_AI, replyId, buffer.toString())
                         lastUiUpdate = now
                     }
                 }
 
-            val parsed = VoltAiAssistant.parseResponse(buffer.toString(), effectiveText, themeConfig.aiControlEnabled)
-            val reports = executeAiActions(parsed.actions)
-            val finalText = buildString {
-                append(parsed.cleanText.ifBlank { if (reports.isNotEmpty()) "Готово!" else "Нет ответа от модели." })
-                if (reports.isNotEmpty()) {
-                    append("\n\n⚡ Выполнено: ")
-                    append(reports.joinToString(", "))
-                }
-            }
-            updateMessageText(CHAT_ID_AI, replyId, finalText)
+            val parsed = VoltAiAssistant.parseResponse(buffer.toString())
+            updateMessageText(CHAT_ID_AI, replyId, parsed.cleanText.ifBlank { "Нет ответа от модели." })
             persistAll()
             isAiGenerating = false
         }
     }
 
-    BackHandler(enabled = route !is AppRoute.List && callState.status == CallStatus.IDLE) {
-        route = AppRoute.List
-    }
+    BackHandler(enabled = route !is AppRoute.List && callState.status == CallStatus.IDLE) { route = AppRoute.List }
 
     Box(modifier = Modifier.fillMaxSize()) {
         AnimatedContent(
             targetState = route,
             transitionSpec = {
                 val springSpec = spring<IntOffset>(dampingRatio = 0.92f, stiffness = 420f)
-                if (targetState !is AppRoute.List) {
-                    (slideInHorizontally(springSpec) { it } + fadeIn(tween(180))) togetherWith
-                        (slideOutHorizontally(springSpec) { -it / 5 } + fadeOut(tween(160)))
-                } else {
-                    (slideInHorizontally(springSpec) { -it / 5 } + fadeIn(tween(180))) togetherWith
-                        (slideOutHorizontally(springSpec) { it } + fadeOut(tween(160)))
-                }
+                if (targetState !is AppRoute.List) (slideInHorizontally(springSpec) { it } + fadeIn(tween(180))) togetherWith (slideOutHorizontally(springSpec) { -it / 5 } + fadeOut(tween(160)))
+                else (slideInHorizontally(springSpec) { -it / 5 } + fadeIn(tween(180))) togetherWith (slideOutHorizontally(springSpec) { it } + fadeOut(tween(160)))
             },
             label = "appNav"
         ) { currentRoute ->
             when (currentRoute) {
-                is AppRoute.List -> {
-                    ChatListScreen(
-                        chats = allChats,
-                        messagesByChat = messagesByChat,
-                        aiStatus = aiStatus,
-                        isLanActive = isLanActive,
-                        lanIp = lanIp,
-                        lanPort = lanPort,
-                        lanPeers = lanPeers,
-                        nickname = nickname,
-                        serverName = serverName,
-                        fingerprintEmojis = fingerprint,
-                        onIdentityChange = { n, s -> updateIdentity(n, s) },
-                        onAddManualPeer = { ip, port -> lanMessenger.addManualPeer(ip, port) },
-                        onCreateGroup = { name ->
-                            val gid = UUID.randomUUID().toString().take(8)
-                            knownGroups[gid] = name
-                            storage.saveKnownGroup(gid, name)
-                            route = AppRoute.Chat("grp_$gid")
-                        },
-                        onCreateChannel = { name ->
-                            val chId = UUID.randomUUID().toString().take(8)
-                            val meta = ChannelMeta(chId, name, myShortId)
-                            knownChannels[chId] = meta
-                            storage.saveChannel(meta)
-                            route = AppRoute.Chat("ch_$chId")
-                        },
-                        onTogglePinChat = { cid ->
-                            pinnedChats = if (cid in pinnedChats) pinnedChats - cid else pinnedChats + cid
-                            persistPins()
-                        },
-                        onOpenSettings = { route = AppRoute.Settings },
-                        onChatClick = { clicked -> unreadCounts[clicked.id] = 0; route = AppRoute.Chat(clicked.id) },
-                        onOpenAiClick = { unreadCounts[CHAT_ID_AI] = 0; route = AppRoute.Chat(CHAT_ID_AI) },
-                        onOpenSavedClick = { unreadCounts[CHAT_ID_SAVED] = 0; route = AppRoute.Chat(CHAT_ID_SAVED) }
-                    )
-                }
+                is AppRoute.List -> ChatListScreen(
+                    chats = allChats,
+                    messagesByChat = messagesByChat,
+                    aiStatus = aiStatus,
+                    isLanActive = isLanActive,
+                    lanIp = lanIp,
+                    lanPort = lanPort,
+                    lanPeers = lanPeers,
+                    nickname = nickname,
+                    serverName = serverName,
+                    fingerprintEmojis = fingerprint,
+                    onIdentityChange = { n, s -> updateIdentity(n, s) },
+                    onAddManualPeer = { ip, port -> lanMessenger.addManualPeer(ip, port) },
+                    onCreateGroup = { name ->
+                        val gid = UUID.randomUUID().toString().take(8)
+                        knownGroups[gid] = name; storage.saveKnownGroup(gid, name)
+                        route = AppRoute.Chat("grp_$gid")
+                    },
+                    onCreateChannel = { name ->
+                        val chId = UUID.randomUUID().toString().take(8)
+                        val meta = ChannelMeta(chId, name, myShortId)
+                        knownChannels[chId] = meta; storage.saveChannel(meta)
+                        route = AppRoute.Chat("ch_$chId")
+                    },
+                    onTogglePinChat = { cid -> pinnedChats = if (cid in pinnedChats) pinnedChats - cid else pinnedChats + cid; persistPins() },
+                    onOpenSettings = { route = AppRoute.Settings },
+                    onChatClick = { clicked -> unreadCounts[clicked.id] = 0; route = AppRoute.Chat(clicked.id) },
+                    onOpenAiClick = { unreadCounts[CHAT_ID_AI] = 0; route = AppRoute.Chat(CHAT_ID_AI) },
+                    onOpenSavedClick = { unreadCounts[CHAT_ID_SAVED] = 0; route = AppRoute.Chat(CHAT_ID_SAVED) }
+                )
 
-                is AppRoute.Settings -> {
-                    SettingsScreen(
-                        config = themeConfig,
-                        nickname = nickname,
-                        serverName = serverName,
-                        lanIp = lanIp,
-                        lanPort = lanPort,
-                        fingerprintEmojis = fingerprint,
-                        relayState = relayState,
-                        onIdentityChange = { n, s -> updateIdentity(n, s) },
-                        onConfigChange = onThemeConfigChange,
-                        onBack = { route = AppRoute.List }
-                    )
-                }
+                is AppRoute.Settings -> SettingsScreen(
+                    config = themeConfig,
+                    nickname = nickname,
+                    serverName = serverName,
+                    lanIp = lanIp,
+                    lanPort = lanPort,
+                    fingerprintEmojis = fingerprint,
+                    relayState = relayState,
+                    onIdentityChange = { n, s -> updateIdentity(n, s) },
+                    onConfigChange = onThemeConfigChange,
+                    onBack = { route = AppRoute.List }
+                )
 
                 is AppRoute.Chat -> {
                     val chat = allChats.firstOrNull { it.id == currentRoute.chatId }
-                    if (chat == null) {
-                        route = AppRoute.List
-                    } else {
-                        ChatScreen(
-                            chat = chat,
-                            messages = messagesByChat[chat.id] ?: emptyList(),
-                            pinnedMessageId = pinnedMessages[chat.id],
-                            aiStatus = aiStatus,
-                            isAiGenerating = isAiGenerating,
-                            voicePlayback = voicePlayback,
-                            aiSystemPrompt = themeConfig.aiSystemPrompt,
-                            onBack = { route = AppRoute.List },
-                            onPickAttachmentMeta = { uri -> storage.readAttachmentMeta(uri) },
-                            onStartVoiceRecord = { voiceManager.startRecording() },
-                            onStopVoiceRecord = { discard ->
-                                voiceManager.stopRecording(discard)?.let { (file, sec) ->
-                                    AttachmentInfo(file.name, file.absolutePath, "audio/mp4", file.length(), isVoice = true, durationSec = sec)
+                    if (chat == null) route = AppRoute.List
+                    else ChatScreen(
+                        chat = chat,
+                        messages = messagesByChat[chat.id] ?: emptyList(),
+                        pinnedMessageId = pinnedMessages[chat.id],
+                        aiStatus = aiStatus,
+                        isAiGenerating = isAiGenerating,
+                        voicePlayback = voicePlayback,
+                        aiSystemPrompt = themeConfig.aiSystemPrompt,
+                        onBack = { route = AppRoute.List },
+                        onPickAttachmentMeta = { uri -> storage.readAttachmentMeta(uri) },
+                        onStartVoiceRecord = { voiceManager.startRecording() },
+                        onStopVoiceRecord = { discard ->
+                            voiceManager.stopRecording(discard)?.let { (file, sec) -> AttachmentInfo(file.name, file.absolutePath, "audio/mp4", file.length(), isVoice = true, durationSec = sec) }
+                        },
+                        onToggleVoicePlay = { msgId, path -> voiceManager.togglePlay(msgId, path) },
+                        onSeekVoice = { msgId, frac -> voiceManager.seekTo(msgId, frac) },
+                        onPinMessage = { msgId -> if (msgId == null) pinnedMessages.remove(chat.id) else pinnedMessages[chat.id] = msgId; persistPins() },
+                        onSendPoll = { poll ->
+                            val msgId = UUID.randomUUID().toString()
+                            upsertMessage(chat.id, ChatMessage(id = msgId, chatId = chat.id, senderName = if (chat.type == ChatType.CHANNEL_LAN) chat.title else nickname, text = "", isFromMe = true, poll = poll, isEncrypted = chat.type != ChatType.SAVED))
+                            scope.launch {
+                                when (chat.type) {
+                                    ChatType.LOCAL_LAN -> lanPeers.firstOrNull { "lan_${it.id}" == chat.id }?.let { lanMessenger.sendPollMessage(it, msgId, poll) }
+                                    ChatType.GROUP_LAN -> { val gid = chat.id.removePrefix("grp_"); lanPeers.forEach { lanMessenger.sendPollMessage(it, msgId, poll, groupId = gid, groupName = chat.title) } }
+                                    ChatType.CHANNEL_LAN -> { val cid = chat.id.removePrefix("ch_"); lanPeers.forEach { lanMessenger.sendPollMessage(it, msgId, poll, channelId = cid, channelName = chat.title) } }
+                                    else -> Unit
                                 }
-                            },
-                            onToggleVoicePlay = { msgId, path -> voiceManager.togglePlay(msgId, path) },
-                            onSeekVoice = { msgId, frac -> voiceManager.seekTo(msgId, frac) },
-                            onPinMessage = { msgId ->
-                                if (msgId == null) pinnedMessages.remove(chat.id) else pinnedMessages[chat.id] = msgId
-                                persistPins()
-                            },
-                            onToggleReaction = { msg, emoji ->
-                                val already = emoji in msg.myReactions
-                                val delta = if (already) -1 else 1
-                                val nextMy = if (already) msg.myReactions - emoji else msg.myReactions + emoji
-                                val nextMap = msg.reactions.toMutableMap()
-                                val nextCnt = ((nextMap[emoji] ?: 0) + delta).coerceAtLeast(0)
-                                if (nextCnt == 0) nextMap.remove(emoji) else nextMap[emoji] = nextCnt
+                            }
+                        },
+                        onVotePoll = { msg, optIdx ->
+                            val p = msg.poll ?: return@ChatScreen
+                            val already = optIdx in p.myVotes
+                            val changes = mutableListOf<Pair<Int, Int>>()
+                            val nextVotes = p.votes.toMutableMap()
+                            val nextMy = p.myVotes.toMutableSet()
 
-                                upsertMessage(chat.id, msg.copy(reactions = nextMap, myReactions = nextMy), countUnread = false)
+                            if (already) {
+                                nextMy.remove(optIdx)
+                                val v = ((nextVotes[optIdx] ?: 0) - 1).coerceAtLeast(0)
+                                if (v == 0) nextVotes.remove(optIdx) else nextVotes[optIdx] = v
+                                changes.add(optIdx to -1)
+                            } else {
+                                if (!p.allowsMultiple && nextMy.isNotEmpty()) {
+                                    nextMy.toList().forEach { prev ->
+                                        nextMy.remove(prev)
+                                        val v = ((nextVotes[prev] ?: 0) - 1).coerceAtLeast(0)
+                                        if (v == 0) nextVotes.remove(prev) else nextVotes[prev] = v
+                                        changes.add(prev to -1)
+                                    }
+                                }
+                                nextMy.add(optIdx)
+                                nextVotes[optIdx] = (nextVotes[optIdx] ?: 0) + 1
+                                changes.add(optIdx to 1)
+                            }
 
-                                scope.launch {
+                            upsertMessage(chat.id, msg.copy(poll = p.copy(votes = nextVotes, myVotes = nextMy)), countUnread = false)
+
+                            scope.launch {
+                                changes.forEach { (idx, delta) ->
                                     when (chat.type) {
-                                        ChatType.LOCAL_LAN -> lanPeers.firstOrNull { "lan_${it.id}" == chat.id }?.let { lanMessenger.sendReaction(it, msg.id, emoji, delta) }
-                                        ChatType.GROUP_LAN -> {
-                                            val gid = chat.id.removePrefix("grp_")
-                                            lanPeers.forEach { lanMessenger.sendReaction(it, msg.id, emoji, delta, groupId = gid) }
-                                        }
-                                        ChatType.CHANNEL_LAN -> {
-                                            val chId = chat.id.removePrefix("ch_")
-                                            lanPeers.forEach { lanMessenger.sendReaction(it, msg.id, emoji, delta, channelId = chId) }
-                                        }
+                                        ChatType.LOCAL_LAN -> lanPeers.firstOrNull { "lan_${it.id}" == chat.id }?.let { lanMessenger.sendPollVote(it, msg.id, idx, delta) }
+                                        ChatType.GROUP_LAN -> { val gid = chat.id.removePrefix("grp_"); lanPeers.forEach { lanMessenger.sendPollVote(it, msg.id, idx, delta, groupId = gid) } }
+                                        ChatType.CHANNEL_LAN -> { val cid = chat.id.removePrefix("ch_"); lanPeers.forEach { lanMessenger.sendPollVote(it, msg.id, idx, delta, channelId = cid) } }
                                         else -> Unit
                                     }
                                 }
-                            },
-                            onStartAudioCall = {
-                                lanPeers.firstOrNull { "lan_${it.id}" == chat.id }?.let { lanMessenger.startCall(it) }
-                            },
-                            onSendMessage = { text, reply, attachment ->
+                            }
+                        },
+                        onToggleReaction = { msg, emoji ->
+                            val already = emoji in msg.myReactions
+                            val delta = if (already) -1 else 1
+                            val nextMy = if (already) msg.myReactions - emoji else msg.myReactions + emoji
+                            val nextMap = msg.reactions.toMutableMap()
+                            val nextCnt = ((nextMap[emoji] ?: 0) + delta).coerceAtLeast(0)
+                            if (nextCnt == 0) nextMap.remove(emoji) else nextMap[emoji] = nextCnt
+                            upsertMessage(chat.id, msg.copy(reactions = nextMap, myReactions = nextMy), countUnread = false)
+                            scope.launch {
                                 when (chat.type) {
-                                    ChatType.AI -> sendToAi(text, reply, attachment)
-
-                                    ChatType.SAVED -> {
-                                        val msgId = UUID.randomUUID().toString()
-                                        upsertMessage(chat.id, ChatMessage(id = msgId, chatId = chat.id, senderName = nickname, text = text, isFromMe = true, replyTo = reply, attachment = attachment))
-                                        if (attachment != null && attachment.localPath.isEmpty()) {
-                                            scope.launch {
-                                                val copied = storage.copyUriToLocal(attachment)
-                                                updateTransferProgress(chat.id, msgId, null, null, copied)
-                                            }
-                                        }
+                                    ChatType.LOCAL_LAN -> lanPeers.firstOrNull { "lan_${it.id}" == chat.id }?.let { lanMessenger.sendReaction(it, msg.id, emoji, delta) }
+                                    ChatType.GROUP_LAN -> { val gid = chat.id.removePrefix("grp_"); lanPeers.forEach { lanMessenger.sendReaction(it, msg.id, emoji, delta, groupId = gid) } }
+                                    ChatType.CHANNEL_LAN -> { val cid = chat.id.removePrefix("ch_"); lanPeers.forEach { lanMessenger.sendReaction(it, msg.id, emoji, delta, channelId = cid) } }
+                                    else -> Unit
+                                }
+                            }
+                        },
+                        onStartAudioCall = { lanPeers.firstOrNull { "lan_${it.id}" == chat.id }?.let { lanMessenger.startCall(it) } },
+                        onSendMessage = { text, reply, attachment ->
+                            when (chat.type) {
+                                ChatType.AI -> sendToAi(text, reply, attachment)
+                                ChatType.SAVED -> {
+                                    val msgId = UUID.randomUUID().toString()
+                                    upsertMessage(chat.id, ChatMessage(id = msgId, chatId = chat.id, senderName = nickname, text = text, isFromMe = true, replyTo = reply, attachment = attachment))
+                                    if (attachment != null && attachment.localPath.isEmpty()) {
+                                        scope.launch { updateTransferProgress(chat.id, msgId, null, null, storage.copyUriToLocal(attachment)) }
                                     }
-
-                                    ChatType.LOCAL_LAN -> {
-                                        val peer = lanPeers.firstOrNull { "lan_${it.id}" == chat.id }
-                                        val msgId = UUID.randomUUID().toString()
-                                        upsertMessage(chat.id, ChatMessage(id = msgId, chatId = chat.id, senderName = nickname, text = text, isFromMe = true, replyTo = reply, attachment = attachment, transferProgress = if (attachment != null) 0f else null, isEncrypted = true))
-                                        if (peer == null) {
-                                            Toast.makeText(context, "Собеседник не в сети", Toast.LENGTH_SHORT).show()
+                                }
+                                ChatType.LOCAL_LAN -> {
+                                    val peer = lanPeers.firstOrNull { "lan_${it.id}" == chat.id }
+                                    val msgId = UUID.randomUUID().toString()
+                                    upsertMessage(chat.id, ChatMessage(id = msgId, chatId = chat.id, senderName = nickname, text = text, isFromMe = true, replyTo = reply, attachment = attachment, transferProgress = if (attachment != null) 0f else null, isEncrypted = true))
+                                    if (peer == null) { Toast.makeText(context, "Собеседник не в сети", Toast.LENGTH_SHORT).show(); updateTransferProgress(chat.id, msgId, null, null); return@ChatScreen }
+                                    scope.launch {
+                                        if (attachment != null) {
+                                            val ok = lanMessenger.sendFileMessage(peer, msgId, text, attachment) { p, mbps -> scope.launch { updateTransferProgress(chat.id, msgId, if (p >= 1f) null else p, mbps) } }
                                             updateTransferProgress(chat.id, msgId, null, null)
-                                            return@ChatScreen
-                                        }
-                                        scope.launch {
-                                            if (attachment != null) {
-                                                val ok = lanMessenger.sendFileMessage(peer, msgId, text, attachment) { p, mbps ->
-                                                    scope.launch { updateTransferProgress(chat.id, msgId, if (p >= 1f) null else p, mbps) }
-                                                }
-                                                updateTransferProgress(chat.id, msgId, null, null)
-                                                if (!ok) Toast.makeText(context, "Ошибка передачи файла", Toast.LENGTH_SHORT).show()
-                                            } else {
-                                                if (!lanMessenger.sendTextMessage(peer, msgId, text)) Toast.makeText(context, "Не удалось доставить", Toast.LENGTH_SHORT).show()
-                                            }
-                                        }
-                                    }
-
-                                    ChatType.GROUP_LAN -> {
-                                        val groupId = chat.id.removePrefix("grp_")
-                                        val msgId = UUID.randomUUID().toString()
-                                        upsertMessage(chat.id, ChatMessage(id = msgId, chatId = chat.id, senderName = nickname, text = text, isFromMe = true, replyTo = reply, attachment = attachment, transferProgress = if (attachment != null && lanPeers.isNotEmpty()) 0f else null, isEncrypted = true))
-                                        if (lanPeers.isEmpty()) return@ChatScreen
-                                        scope.launch {
-                                            lanPeers.forEach { peer ->
-                                                if (attachment != null) {
-                                                    lanMessenger.sendFileMessage(peer, msgId, text, attachment, groupId = groupId, groupName = chat.title) { p, mbps ->
-                                                        scope.launch { updateTransferProgress(chat.id, msgId, if (p >= 1f) null else p, mbps) }
-                                                    }
-                                                } else {
-                                                    lanMessenger.sendTextMessage(peer, msgId, text, groupId = groupId, groupName = chat.title)
-                                                }
-                                            }
-                                            updateTransferProgress(chat.id, msgId, null, null)
-                                        }
-                                    }
-
-                                    ChatType.CHANNEL_LAN -> {
-                                        val chId = chat.id.removePrefix("ch_")
-                                        val msgId = UUID.randomUUID().toString()
-                                        upsertMessage(chat.id, ChatMessage(id = msgId, chatId = chat.id, senderName = chat.title, text = text, isFromMe = true, replyTo = reply, attachment = attachment, transferProgress = if (attachment != null && lanPeers.isNotEmpty()) 0f else null, isEncrypted = true))
-                                        if (lanPeers.isEmpty()) return@ChatScreen
-                                        scope.launch {
-                                            lanPeers.forEach { peer ->
-                                                if (attachment != null) {
-                                                    lanMessenger.sendFileMessage(peer, msgId, text, attachment, channelId = chId, channelName = chat.title) { p, mbps ->
-                                                        scope.launch { updateTransferProgress(chat.id, msgId, if (p >= 1f) null else p, mbps) }
-                                                    }
-                                                } else {
-                                                    lanMessenger.sendTextMessage(peer, msgId, text, channelId = chId, channelName = chat.title)
-                                                }
-                                            }
-                                            updateTransferProgress(chat.id, msgId, null, null)
+                                            if (!ok) Toast.makeText(context, "Ошибка передачи файла", Toast.LENGTH_SHORT).show()
+                                        } else {
+                                            if (!lanMessenger.sendTextMessage(peer, msgId, text)) Toast.makeText(context, "Не удалось доставить", Toast.LENGTH_SHORT).show()
                                         }
                                     }
                                 }
-                            },
-                            onStopAi = { aiJob?.cancel(); isAiGenerating = false },
-                            onDeleteMessage = { msg ->
-                                messagesByChat[chat.id] = (messagesByChat[chat.id] ?: emptyList()).filterNot { it.id == msg.id }
-                                if (pinnedMessages[chat.id] == msg.id) { pinnedMessages.remove(chat.id); persistPins() }
-                                persistAll()
-                            },
-                            onOpenVoltAi = { VoltAiClient.launchVoltAi(context) }
-                        )
-                    }
+                                ChatType.GROUP_LAN -> {
+                                    val groupId = chat.id.removePrefix("grp_")
+                                    val msgId = UUID.randomUUID().toString()
+                                    upsertMessage(chat.id, ChatMessage(id = msgId, chatId = chat.id, senderName = nickname, text = text, isFromMe = true, replyTo = reply, attachment = attachment, transferProgress = if (attachment != null && lanPeers.isNotEmpty()) 0f else null, isEncrypted = true))
+                                    if (lanPeers.isEmpty()) return@ChatScreen
+                                    scope.launch {
+                                        lanPeers.forEach { peer ->
+                                            if (attachment != null) lanMessenger.sendFileMessage(peer, msgId, text, attachment, groupId = groupId, groupName = chat.title) { p, mbps -> scope.launch { updateTransferProgress(chat.id, msgId, if (p >= 1f) null else p, mbps) } }
+                                            else lanMessenger.sendTextMessage(peer, msgId, text, groupId = groupId, groupName = chat.title)
+                                        }
+                                        updateTransferProgress(chat.id, msgId, null, null)
+                                    }
+                                }
+                                ChatType.CHANNEL_LAN -> {
+                                    val chId = chat.id.removePrefix("ch_")
+                                    val msgId = UUID.randomUUID().toString()
+                                    upsertMessage(chat.id, ChatMessage(id = msgId, chatId = chat.id, senderName = chat.title, text = text, isFromMe = true, replyTo = reply, attachment = attachment, transferProgress = if (attachment != null && lanPeers.isNotEmpty()) 0f else null, isEncrypted = true))
+                                    if (lanPeers.isEmpty()) return@ChatScreen
+                                    scope.launch {
+                                        lanPeers.forEach { peer ->
+                                            if (attachment != null) lanMessenger.sendFileMessage(peer, msgId, text, attachment, channelId = chId, channelName = chat.title) { p, mbps -> scope.launch { updateTransferProgress(chat.id, msgId, if (p >= 1f) null else p, mbps) } }
+                                            else lanMessenger.sendTextMessage(peer, msgId, text, channelId = chId, channelName = chat.title)
+                                        }
+                                        updateTransferProgress(chat.id, msgId, null, null)
+                                    }
+                                }
+                            }
+                        },
+                        onStopAi = { aiJob?.cancel(); isAiGenerating = false },
+                        onDeleteMessage = { msg ->
+                            messagesByChat[chat.id] = (messagesByChat[chat.id] ?: emptyList()).filterNot { it.id == msg.id }
+                            if (pinnedMessages[chat.id] == msg.id) { pinnedMessages.remove(chat.id); persistPins() }
+                            persistAll()
+                        },
+                        onOpenVoltAi = { VoltAiClient.launchVoltAi(context) }
+                    )
                 }
             }
         }
@@ -696,8 +648,7 @@ fun VoltMessengerApp(
             CallOverlay(
                 state = callState,
                 onAccept = {
-                    val granted = ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED
-                    if (granted) lanMessenger.acceptIncomingCall()
+                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) == PackageManager.PERMISSION_GRANTED) lanMessenger.acceptIncomingCall()
                     else acceptCallPermLauncher.launch(Manifest.permission.RECORD_AUDIO)
                 },
                 onDecline = { lanMessenger.declineIncomingCall() },

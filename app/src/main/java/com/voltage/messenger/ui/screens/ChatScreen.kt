@@ -11,6 +11,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateContentSize
 import androidx.compose.animation.core.RepeatMode
 import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.animateFloatAsState
 import androidx.compose.animation.core.infiniteRepeatable
 import androidx.compose.animation.core.rememberInfiniteTransition
 import androidx.compose.animation.core.spring
@@ -56,12 +57,14 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Reply
 import androidx.compose.material.icons.automirrored.rounded.Send
+import androidx.compose.material.icons.rounded.Add
 import androidx.compose.material.icons.rounded.AttachFile
 import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.Call
 import androidx.compose.material.icons.rounded.Campaign
+import androidx.compose.material.icons.rounded.CheckCircle
 import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
@@ -75,11 +78,14 @@ import androidx.compose.material.icons.rounded.Mic
 import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
+import androidx.compose.material.icons.rounded.Poll
 import androidx.compose.material.icons.rounded.PushPin
+import androidx.compose.material.icons.rounded.RadioButtonUnchecked
 import androidx.compose.material.icons.rounded.Stop
 import androidx.compose.material.icons.rounded.VideoFile
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.AlertDialog
+import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
@@ -91,7 +97,9 @@ import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
@@ -100,6 +108,7 @@ import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableIntStateOf
+import androidx.compose.runtime.mutableStateListOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
@@ -128,6 +137,7 @@ import com.voltage.messenger.model.AttachmentInfo
 import com.voltage.messenger.model.ChatMessage
 import com.voltage.messenger.model.ChatRoom
 import com.voltage.messenger.model.ChatType
+import com.voltage.messenger.model.PollData
 import com.voltage.messenger.model.ReplyPreview
 import com.voltage.messenger.ui.components.WavySeekBar
 import com.voltage.messenger.ui.theme.AppSurface
@@ -153,6 +163,8 @@ fun ChatScreen(
     aiSystemPrompt: String,
     onBack: () -> Unit,
     onSendMessage: (text: String, replyTo: ReplyPreview?, attachment: AttachmentInfo?) -> Unit,
+    onSendPoll: (poll: PollData) -> Unit,
+    onVotePoll: (message: ChatMessage, optionIndex: Int) -> Unit,
     onPickAttachmentMeta: (android.net.Uri) -> AttachmentInfo?,
     onStartVoiceRecord: () -> Boolean,
     onStopVoiceRecord: (discard: Boolean) -> AttachmentInfo?,
@@ -177,6 +189,8 @@ fun ChatScreen(
     var selectedMessage by remember { mutableStateOf<ChatMessage?>(null) }
     var aiPopupMessage by remember { mutableStateOf<ChatMessage?>(null) }
     var showVideoCallDialog by remember { mutableStateOf(false) }
+    var showAttachSheet by remember { mutableStateOf(false) }
+    var showCreatePollSheet by remember { mutableStateOf(false) }
 
     var isRecordingVoice by remember { mutableStateOf(false) }
     var recordSeconds by remember { mutableIntStateOf(0) }
@@ -260,7 +274,7 @@ fun ChatScreen(
                     modifier = Modifier.fillMaxWidth().statusBarsPadding().padding(horizontal = 4.dp, vertical = 6.dp),
                     verticalAlignment = Alignment.CenterVertically
                 ) {
-                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = "Назад") }
+                    IconButton(onClick = onBack) { Icon(Icons.AutoMirrored.Rounded.ArrowBack, "Назад") }
 
                     Box(
                         modifier = Modifier.size(40.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primaryContainer),
@@ -292,20 +306,15 @@ fun ChatScreen(
 
                     if (chat.type == ChatType.LOCAL_LAN) {
                         IconButton(enabled = chat.isOnline, onClick = { withMicPermission { onStartAudioCall() } }) {
-                            Icon(Icons.Rounded.Call, contentDescription = "Аудиозвонок")
+                            Icon(Icons.Rounded.Call, "Аудиозвонок")
                         }
                         IconButton(enabled = chat.isOnline, onClick = { showVideoCallDialog = true }) {
-                            Icon(Icons.Rounded.Videocam, contentDescription = "Видеозвонок")
+                            Icon(Icons.Rounded.Videocam, "Видеозвонок")
                         }
                     }
                 }
 
-                // Закреплённое сообщение под шапкой как в Telegram
-                AnimatedVisibility(
-                    visible = pinnedMessage != null,
-                    enter = expandVertically(spring(dampingRatio = 0.9f, stiffness = 450f)) + fadeIn(tween(150)),
-                    exit = shrinkVertically(spring(dampingRatio = 0.9f, stiffness = 450f)) + fadeOut(tween(120))
-                ) {
+                AnimatedVisibility(visible = pinnedMessage != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                     pinnedMessage?.let { pin ->
                         Column {
                             HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant.copy(alpha = 0.4f))
@@ -323,16 +332,11 @@ fun ChatScreen(
                                 Spacer(modifier = Modifier.width(10.dp))
                                 Column(modifier = Modifier.weight(1f)) {
                                     Text("Закреплённое сообщение", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
-                                    Text(
-                                        text = pin.text.ifBlank { pin.attachment?.name ?: "Вложение" },
-                                        style = MaterialTheme.typography.bodySmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        maxLines = 1,
-                                        overflow = TextOverflow.Ellipsis
-                                    )
+                                    val label = pin.poll?.let { "📊 ${it.question}" } ?: pin.text.ifBlank { pin.attachment?.name ?: "Вложение" }
+                                    Text(label, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
                                 IconButton(onClick = { onPinMessage(null) }, modifier = Modifier.size(28.dp)) {
-                                    Icon(Icons.Rounded.Close, contentDescription = "Открепить", modifier = Modifier.size(16.dp))
+                                    Icon(Icons.Rounded.Close, "Открепить", modifier = Modifier.size(16.dp))
                                 }
                             }
                         }
@@ -342,28 +346,15 @@ fun ChatScreen(
         },
         bottomBar = {
             if (!canWrite) {
-                Box(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.surfaceContainerLow)
-                        .navigationBarsPadding()
-                        .padding(vertical = 14.dp),
-                    contentAlignment = Alignment.Center
-                ) {
+                Box(modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerLow).navigationBarsPadding().padding(vertical = 14.dp), contentAlignment = Alignment.Center) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Icon(Icons.Rounded.Campaign, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(18.dp))
                         Spacer(modifier = Modifier.width(8.dp))
-                        Text("Канал • Нажимай на посты, чтобы ставить реакции", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+                        Text("Канал • Голосуй в опросах и ставь реакции", style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                     }
                 }
             } else {
-                Column(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .background(MaterialTheme.colorScheme.surface)
-                        .navigationBarsPadding()
-                        .animateContentSize(spring(dampingRatio = 0.88f, stiffness = 460f))
-                ) {
+                Column(modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surface).navigationBarsPadding().animateContentSize(spring(dampingRatio = 0.88f, stiffness = 460f))) {
                     AnimatedVisibility(visible = pendingAttachment != null, enter = expandVertically() + fadeIn(), exit = shrinkVertically() + fadeOut()) {
                         pendingAttachment?.let { att ->
                             Row(modifier = Modifier.fillMaxWidth().background(MaterialTheme.colorScheme.surfaceContainerLow).padding(horizontal = 14.dp, vertical = 8.dp), verticalAlignment = Alignment.CenterVertically) {
@@ -378,9 +369,7 @@ fun ChatScreen(
                                     }
                                     Text(sub, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
                                 }
-                                IconButton(onClick = { pendingAttachment = null }, modifier = Modifier.size(28.dp)) {
-                                    Icon(Icons.Rounded.Close, contentDescription = "Убрать", modifier = Modifier.size(18.dp))
-                                }
+                                IconButton(onClick = { pendingAttachment = null }, modifier = Modifier.size(28.dp)) { Icon(Icons.Rounded.Close, "Убрать", modifier = Modifier.size(18.dp)) }
                             }
                         }
                     }
@@ -394,9 +383,7 @@ fun ChatScreen(
                                     Text(reply.senderName, style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.primary, fontWeight = FontWeight.SemiBold)
                                     Text(reply.text, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                                 }
-                                IconButton(onClick = { replyingTo = null }, modifier = Modifier.size(28.dp)) {
-                                    Icon(Icons.Rounded.Close, contentDescription = "Отмена", modifier = Modifier.size(18.dp))
-                                }
+                                IconButton(onClick = { replyingTo = null }, modifier = Modifier.size(28.dp)) { Icon(Icons.Rounded.Close, "Отмена", modifier = Modifier.size(18.dp)) }
                             }
                         }
                     }
@@ -426,14 +413,17 @@ fun ChatScreen(
                                         if (voiceAtt != null) { onSendMessage("", replyingTo, voiceAtt); replyingTo = null }
                                     },
                                     modifier = Modifier.size(50.dp)
-                                ) { Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Отправить голосовое") }
+                                ) { Icon(Icons.AutoMirrored.Rounded.Send, "Отправить голосовое") }
                             }
                         } else {
                             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 10.dp, vertical = 8.dp), verticalAlignment = Alignment.Bottom) {
                                 AppSurface(modifier = Modifier.weight(1f), shape = RoundedCornerShape(26.dp), color = MaterialTheme.colorScheme.surfaceContainer) {
                                     Row(modifier = Modifier.fillMaxWidth().padding(start = 6.dp, end = 14.dp, top = 4.dp, bottom = 4.dp), verticalAlignment = Alignment.CenterVertically) {
-                                        IconButton(onClick = { filePickerLauncher.launch(arrayOf("*/*")) }) {
-                                            Icon(Icons.Rounded.AttachFile, "Вложение", tint = if (pendingAttachment != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
+                                        IconButton(onClick = {
+                                            if (chat.type == ChatType.AI) filePickerLauncher.launch(arrayOf("*/*"))
+                                            else showAttachSheet = true
+                                        }) {
+                                            Icon(Icons.Rounded.AttachFile, "Вложение или опрос", tint = if (pendingAttachment != null) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant)
                                         }
                                         Box(modifier = Modifier.weight(1f).padding(vertical = 10.dp)) {
                                             if (inputText.isEmpty()) {
@@ -469,12 +459,7 @@ fun ChatScreen(
                                     onClick = {
                                         when (buttonState) {
                                             2 -> onStopAi()
-                                            1 -> {
-                                                onSendMessage(inputText.trim(), replyingTo, pendingAttachment)
-                                                inputText = ""
-                                                replyingTo = null
-                                                pendingAttachment = null
-                                            }
+                                            1 -> { onSendMessage(inputText.trim(), replyingTo, pendingAttachment); inputText = ""; replyingTo = null; pendingAttachment = null }
                                             else -> withMicPermission {
                                                 if (onStartVoiceRecord()) isRecordingVoice = true
                                                 else Toast.makeText(context, "Не удалось запустить запись", Toast.LENGTH_SHORT).show()
@@ -504,7 +489,6 @@ fun ChatScreen(
     ) { innerPadding ->
         Box(modifier = Modifier.fillMaxSize().padding(innerPadding)) {
             ChatWallpaperBackground(style = themeCfg.wallpaperStyle)
-
             Column(modifier = Modifier.fillMaxSize()) {
                 if (chat.type == ChatType.AI && (aiStatus == VoltAiStatus.NOT_INSTALLED || aiStatus == VoltAiStatus.SERVER_OFFLINE)) {
                     AppSurface(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.secondaryContainer) {
@@ -536,16 +520,23 @@ fun ChatScreen(
                                 .padding(top = if (isFirstInGroup) 6.dp else 0.dp, bottom = if (isLastInGroup) 2.dp else 0.dp)
                                 .animateItem(fadeInSpec = tween(180), placementSpec = spring(dampingRatio = 0.88f, stiffness = 440f))
                         ) {
-                            if (msg.attachment?.isVoice == true || msg.isMediaDemo) {
-                                WavyVoiceMessageBubble(
+                            when {
+                                msg.poll != null -> PollMessageBubble(
+                                    message = msg,
+                                    poll = msg.poll,
+                                    cornerRadiusDp = themeCfg.bubbleRadius,
+                                    onVote = { optIdx -> onVotePoll(msg, optIdx) },
+                                    onHeaderTap = { selectedMessage = msg },
+                                    onReactionClick = { emoji -> onToggleReaction(msg, emoji) }
+                                )
+                                msg.attachment?.isVoice == true || msg.isMediaDemo -> WavyVoiceMessageBubble(
                                     message = msg,
                                     playback = voicePlayback,
                                     onTogglePlay = { val p = msg.attachment?.localPath.orEmpty(); if (p.isNotEmpty()) onToggleVoicePlay(msg.id, p) },
                                     onSeek = { frac -> onSeekVoice(msg.id, frac) },
                                     onTap = { selectedMessage = msg }
                                 )
-                            } else {
-                                TelegramMessageBubble(
+                                else -> TelegramMessageBubble(
                                     message = msg,
                                     showSenderName = (chat.type == ChatType.GROUP_LAN || chat.type == ChatType.CHANNEL_LAN) && !msg.isFromMe && isFirstInGroup,
                                     isFirstInGroup = isFirstInGroup,
@@ -571,40 +562,53 @@ fun ChatScreen(
         }
     }
 
-    // Короткий тап на сообщение: панель реакций + действия (Закрепить, Ответить, Volt AI, Копировать, Удалить)
+    // Меню скрепки: Файл / Опрос
+    if (showAttachSheet) {
+        ModalBottomSheet(onDismissRequest = { showAttachSheet = false }, containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+            Column(modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 16.dp)) {
+                ListItem(
+                    headlineContent = { Text("Файл, фото или модель .gguf") },
+                    supportingContent = { Text("Быстрая зашифрованная передача по сети") },
+                    leadingContent = { Icon(Icons.Rounded.AttachFile, null, tint = MaterialTheme.colorScheme.primary) },
+                    modifier = Modifier.clickable { showAttachSheet = false; filePickerLauncher.launch(arrayOf("*/*")) }
+                )
+                ListItem(
+                    headlineContent = { Text("Создать опрос") },
+                    supportingContent = { Text("Голосование как в Telegram с процентами") },
+                    leadingContent = { Icon(Icons.Rounded.Poll, null, tint = MaterialTheme.colorScheme.primary) },
+                    modifier = Modifier.clickable { showAttachSheet = false; showCreatePollSheet = true }
+                )
+            }
+        }
+    }
+
+    // Конструктор опроса
+    if (showCreatePollSheet) {
+        CreatePollSheet(
+            onDismiss = { showCreatePollSheet = false },
+            onCreate = { poll ->
+                showCreatePollSheet = false
+                onSendPoll(poll)
+            }
+        )
+    }
+
     selectedMessage?.let { msg ->
         ModalBottomSheet(onDismissRequest = { selectedMessage = null }, containerColor = MaterialTheme.colorScheme.surfaceContainer) {
             Column(modifier = Modifier.fillMaxWidth().navigationBarsPadding().padding(bottom = 16.dp)) {
-                // Быстрая панель реакций
                 Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .padding(horizontal = 14.dp, vertical = 6.dp)
-                        .clip(RoundedCornerShape(24.dp))
-                        .background(MaterialTheme.colorScheme.surface)
-                        .padding(horizontal = 8.dp, vertical = 6.dp),
+                    modifier = Modifier.fillMaxWidth().padding(horizontal = 14.dp, vertical = 6.dp).clip(RoundedCornerShape(24.dp)).background(MaterialTheme.colorScheme.surface).padding(horizontal = 8.dp, vertical = 6.dp),
                     horizontalArrangement = Arrangement.SpaceEvenly
                 ) {
                     QUICK_REACTIONS.forEach { emoji ->
                         val active = emoji in msg.myReactions
                         Box(
-                            modifier = Modifier
-                                .size(40.dp)
-                                .clip(CircleShape)
-                                .background(if (active) MaterialTheme.colorScheme.primaryContainer else Color.Transparent)
-                                .clickable {
-                                    onToggleReaction(msg, emoji)
-                                    selectedMessage = null
-                                },
+                            modifier = Modifier.size(40.dp).clip(CircleShape).background(if (active) MaterialTheme.colorScheme.primaryContainer else Color.Transparent).clickable { onToggleReaction(msg, emoji); selectedMessage = null },
                             contentAlignment = Alignment.Center
-                        ) {
-                            Text(emoji, style = MaterialTheme.typography.titleLarge)
-                        }
+                        ) { Text(emoji, style = MaterialTheme.typography.titleLarge) }
                     }
                 }
-
                 Spacer(modifier = Modifier.height(4.dp))
-
                 msg.attachment?.takeIf { !it.isVoice && it.localPath.isNotEmpty() }?.let { att ->
                     ListItem(
                         headlineContent = { Text(if (att.isAiModel) "Где лежит модель?" else "Открыть файл") },
@@ -613,28 +617,23 @@ fun ChatScreen(
                         modifier = Modifier.clickable { selectedMessage = null; openAttachmentFile(att) }
                     )
                 }
-
                 if (canWrite) {
                     ListItem(
                         headlineContent = { Text("Ответить") },
                         leadingContent = { Icon(Icons.AutoMirrored.Rounded.Reply, null) },
                         modifier = Modifier.clickable {
-                            replyingTo = ReplyPreview(msg.senderName, msg.text.ifBlank { msg.attachment?.name ?: "Вложение" })
+                            val preview = msg.poll?.let { "📊 ${it.question}" } ?: msg.text.ifBlank { msg.attachment?.name ?: "Вложение" }
+                            replyingTo = ReplyPreview(msg.senderName, preview)
                             selectedMessage = null
                         }
                     )
                 }
-
                 val isPinnedNow = pinnedMessageId == msg.id
                 ListItem(
                     headlineContent = { Text(if (isPinnedNow) "Открепить сообщение" else "Закрепить сообщение") },
                     leadingContent = { Icon(Icons.Rounded.PushPin, null, tint = MaterialTheme.colorScheme.primary) },
-                    modifier = Modifier.clickable {
-                        onPinMessage(if (isPinnedNow) null else msg.id)
-                        selectedMessage = null
-                    }
+                    modifier = Modifier.clickable { onPinMessage(if (isPinnedNow) null else msg.id); selectedMessage = null }
                 )
-
                 if (chat.type != ChatType.AI && msg.text.isNotBlank()) {
                     ListItem(
                         headlineContent = { Text("Спросить у Volt AI") },
@@ -643,7 +642,6 @@ fun ChatScreen(
                         modifier = Modifier.clickable { selectedMessage = null; aiPopupMessage = msg }
                     )
                 }
-
                 if (msg.text.isNotBlank()) {
                     ListItem(
                         headlineContent = { Text("Копировать текст") },
@@ -651,7 +649,6 @@ fun ChatScreen(
                         modifier = Modifier.clickable { clipboard.setText(AnnotatedString(msg.text)); selectedMessage = null }
                     )
                 }
-
                 ListItem(
                     headlineContent = { Text("Удалить", color = MaterialTheme.colorScheme.error) },
                     leadingContent = { Icon(Icons.Rounded.Delete, null, tint = MaterialTheme.colorScheme.error) },
@@ -685,6 +682,202 @@ fun ChatScreen(
     }
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun CreatePollSheet(
+    onDismiss: () -> Unit,
+    onCreate: (PollData) -> Unit
+) {
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+    var question by remember { mutableStateOf("") }
+    val options = remember { mutableStateListOf("", "") }
+    var isAnonymous by remember { mutableStateOf(true) }
+    var allowsMultiple by remember { mutableStateOf(false) }
+
+    ModalBottomSheet(onDismissRequest = onDismiss, sheetState = sheetState, containerColor = MaterialTheme.colorScheme.surfaceContainer) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .verticalScroll(rememberScrollState())
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(horizontal = 18.dp, vertical = 8.dp),
+            verticalArrangement = Arrangement.spacedBy(10.dp)
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Icon(Icons.Rounded.Poll, null, tint = MaterialTheme.colorScheme.primary)
+                Spacer(modifier = Modifier.width(8.dp))
+                Text("Новый опрос", style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.Bold)
+            }
+
+            OutlinedTextField(
+                value = question,
+                onValueChange = { question = it },
+                label = { Text("Вопрос") },
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            )
+
+            Text("Варианты ответа", style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.primary)
+
+            options.forEachIndexed { idx, value ->
+                Row(verticalAlignment = Alignment.CenterVertically) {
+                    OutlinedTextField(
+                        value = value,
+                        onValueChange = { options[idx] = it },
+                        label = { Text("Вариант ${idx + 1}") },
+                        singleLine = true,
+                        shape = RoundedCornerShape(14.dp),
+                        modifier = Modifier.weight(1f)
+                    )
+                    if (options.size > 2) {
+                        IconButton(onClick = { options.removeAt(idx) }) {
+                            Icon(Icons.Rounded.Close, "Удалить вариант")
+                        }
+                    }
+                }
+            }
+
+            if (options.size < 6) {
+                TextButton(onClick = { options.add("") }) {
+                    Icon(Icons.Rounded.Add, null, modifier = Modifier.size(18.dp))
+                    Spacer(modifier = Modifier.width(4.dp))
+                    Text("Добавить вариант")
+                }
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Анонимное голосование", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                Switch(checked = isAnonymous, onCheckedChange = { isAnonymous = it })
+            }
+
+            Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text("Несколько вариантов ответа", style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                Switch(checked = allowsMultiple, onCheckedChange = { allowsMultiple = it })
+            }
+
+            val cleanOpts = options.map { it.trim() }.filter { it.isNotEmpty() }
+            Button(
+                enabled = question.isNotBlank() && cleanOpts.size >= 2,
+                onClick = { onCreate(PollData(question.trim(), cleanOpts, isAnonymous = isAnonymous, allowsMultiple = allowsMultiple)) },
+                shape = RoundedCornerShape(16.dp),
+                modifier = Modifier.fillMaxWidth()
+            ) { Text("Создать опрос") }
+
+            Spacer(modifier = Modifier.height(12.dp))
+        }
+    }
+}
+
+@OptIn(ExperimentalLayoutApi::class)
+@Composable
+private fun PollMessageBubble(
+    message: ChatMessage,
+    poll: PollData,
+    cornerRadiusDp: Int,
+    onVote: (Int) -> Unit,
+    onHeaderTap: () -> Unit,
+    onReactionClick: (String) -> Unit
+) {
+    val isMe = message.isFromMe
+    val r = cornerRadiusDp.dp
+    val shape = if (isMe) RoundedCornerShape(topStart = r, topEnd = r, bottomStart = r, bottomEnd = 6.dp)
+    else RoundedCornerShape(topStart = r, topEnd = r, bottomStart = 6.dp, bottomEnd = r)
+    val total = poll.totalVotes
+    val showResults = poll.myVotes.isNotEmpty() || total > 0
+
+    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = if (isMe) Alignment.End else Alignment.Start) {
+        AppSurface(
+            modifier = Modifier.widthIn(min = 250.dp, max = 320.dp).clip(shape),
+            shape = shape,
+            color = if (isMe) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer,
+            contentColor = if (isMe) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
+        ) {
+            Column(modifier = Modifier.padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                Column(modifier = Modifier.fillMaxWidth().clickable(onClick = onHeaderTap)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Icon(Icons.Rounded.Poll, null, tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(16.dp))
+                        Spacer(modifier = Modifier.width(6.dp))
+                        Text(
+                            text = if (poll.isAnonymous) "Анонимный опрос" else "Публичный опрос",
+                            style = MaterialTheme.typography.labelSmall,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                    }
+                    Spacer(modifier = Modifier.height(4.dp))
+                    Text(poll.question, style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.Bold)
+                }
+
+                poll.options.forEachIndexed { idx, optText ->
+                    val votes = poll.votes[idx] ?: 0
+                    val chosen = idx in poll.myVotes
+                    val targetFrac = if (total > 0) votes.toFloat() / total.toFloat() else 0f
+                    val animatedFrac by animateFloatAsState(targetValue = targetFrac, animationSpec = spring(dampingRatio = 0.85f, stiffness = 360f), label = "pollBar")
+                    val pct = (targetFrac * 100).toInt()
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(MaterialTheme.colorScheme.surface.copy(alpha = if (chosen) 0.65f else 0.35f))
+                            .clickable { onVote(idx) }
+                            .padding(horizontal = 10.dp, vertical = 8.dp)
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = if (chosen) Icons.Rounded.CheckCircle else Icons.Rounded.RadioButtonUnchecked,
+                                contentDescription = null,
+                                tint = if (chosen) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.onSurfaceVariant,
+                                modifier = Modifier.size(18.dp)
+                            )
+                            Spacer(modifier = Modifier.width(8.dp))
+                            Text(optText, style = MaterialTheme.typography.bodyMedium, modifier = Modifier.weight(1f))
+                            if (showResults) {
+                                Spacer(modifier = Modifier.width(6.dp))
+                                Text("$pct%", style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary)
+                            }
+                        }
+                        if (showResults) {
+                            Spacer(modifier = Modifier.height(6.dp))
+                            LinearProgressIndicator(
+                                progress = { animatedFrac },
+                                modifier = Modifier.fillMaxWidth().height(5.dp).clip(RoundedCornerShape(3.dp))
+                            )
+                        }
+                    }
+                }
+
+                Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween, verticalAlignment = Alignment.CenterVertically) {
+                    Text(
+                        text = if (total == 0) "Пока нет голосов" else "Голосов: $total",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+                    Text(message.timeLabel, style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f))
+                }
+            }
+        }
+
+        if (message.reactions.isNotEmpty()) {
+            FlowRow(modifier = Modifier.padding(top = 4.dp, start = 4.dp, end = 4.dp), horizontalArrangement = Arrangement.spacedBy(5.dp)) {
+                message.reactions.forEach { (emoji, count) ->
+                    if (count > 0) {
+                        val isMine = emoji in message.myReactions
+                        Row(
+                            modifier = Modifier.clip(RoundedCornerShape(14.dp)).background(if (isMine) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh).clickable { onReactionClick(emoji) }.padding(horizontal = 8.dp, vertical = 3.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Text(emoji, style = MaterialTheme.typography.bodySmall)
+                            if (count > 1) { Spacer(modifier = Modifier.width(3.dp)); Text(count.toString(), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold) }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}
+
 @Composable
 private fun ChatWallpaperBackground(style: Int) {
     val primary = MaterialTheme.colorScheme.primary
@@ -697,10 +890,7 @@ private fun ChatWallpaperBackground(style: Int) {
             var y = step / 2f
             while (y < size.height) {
                 var x = step / 2f
-                while (x < size.width) {
-                    drawCircle(color = dotColor, radius = 1.6.dp.toPx(), center = Offset(x, y))
-                    x += step
-                }
+                while (x < size.width) { drawCircle(color = dotColor, radius = 1.6.dp.toPx(), center = Offset(x, y)); x += step }
                 y += step
             }
         }
@@ -720,7 +910,6 @@ private fun InChatAiMiniWindow(
     val scope = rememberCoroutineScope()
     val clipboard = LocalClipboardManager.current
     val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
-
     var aiReply by remember(sourceMessage.id) { mutableStateOf("") }
     var isStreaming by remember(sourceMessage.id) { mutableStateOf(true) }
     var hasError by remember(sourceMessage.id) { mutableStateOf(false) }
@@ -728,20 +917,13 @@ private fun InChatAiMiniWindow(
     var activeJob by remember { mutableStateOf<Job?>(null) }
 
     fun runGeneration(extraPrompt: String?) {
-        activeJob?.cancel()
-        aiReply = ""
-        isStreaming = true
-        hasError = false
-        val prompt = if (extraPrompt.isNullOrBlank()) {
-            "Кратко и по делу ответь или объясни это сообщение из чата:\n«${sourceMessage.text}»"
-        } else {
-            "Контекст сообщения из чата: «${sourceMessage.text}»\n\nЗапрос пользователя: $extraPrompt"
-        }
+        activeJob?.cancel(); aiReply = ""; isStreaming = true; hasError = false
+        val prompt = if (extraPrompt.isNullOrBlank()) "Кратко ответь или объясни:\n«${sourceMessage.text}»"
+        else "Сообщение: «${sourceMessage.text}»\nЗапрос: $extraPrompt"
         activeJob = scope.launch {
-            val buffer = StringBuilder()
-            var lastUpdate = 0L
+            val buffer = StringBuilder(); var lastUpdate = 0L
             VoltAiClient.streamCompletion(listOf(AiChatMessage("user", prompt)), systemPrompt)
-                .catch { hasError = true; aiReply = "Локальный сервер Volt AI сейчас выключен. Открой приложение Volt AI и включи сервер." }
+                .catch { hasError = true; aiReply = "Локальный сервер Volt AI выключен. Открой приложение Volt AI и включи сервер." }
                 .collect { chunk ->
                     buffer.append(chunk)
                     val now = System.currentTimeMillis()
@@ -764,11 +946,9 @@ private fun InChatAiMiniWindow(
                 Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {
                     Text("Volt AI • Быстрый ответ", style = MaterialTheme.typography.titleMedium, fontWeight = FontWeight.SemiBold)
-                    Text(if (isStreaming) "Генерирует ответ локально..." else "Готово", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
+                    Text(if (isStreaming) "Генерирует..." else "Готово", style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.primary)
                 }
-                if (isStreaming) {
-                    IconButton(onClick = { activeJob?.cancel(); isStreaming = false }) { Icon(Icons.Rounded.Stop, "Остановить") }
-                }
+                if (isStreaming) IconButton(onClick = { activeJob?.cancel(); isStreaming = false }) { Icon(Icons.Rounded.Stop, "Стоп") }
             }
             Spacer(modifier = Modifier.height(10.dp))
             AppSurface(modifier = Modifier.fillMaxWidth(), shape = RoundedCornerShape(16.dp), color = MaterialTheme.colorScheme.surface) {
@@ -781,15 +961,10 @@ private fun InChatAiMiniWindow(
                     }
                 }
             }
-            if (isStreaming) {
-                Spacer(modifier = Modifier.height(8.dp))
-                LinearProgressIndicator(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp)))
-            }
+            if (isStreaming) { Spacer(modifier = Modifier.height(8.dp)); LinearProgressIndicator(modifier = Modifier.fillMaxWidth().clip(RoundedCornerShape(4.dp))) }
             Spacer(modifier = Modifier.height(10.dp))
             AppSurface(modifier = Modifier.fillMaxWidth().heightIn(min = 90.dp, max = 260.dp), shape = RoundedCornerShape(18.dp), color = MaterialTheme.colorScheme.surfaceContainerHigh) {
-                Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(14.dp)) {
-                    Text(aiReply.ifEmpty { "Думает..." }, style = MaterialTheme.typography.bodyMedium)
-                }
+                Column(modifier = Modifier.fillMaxWidth().verticalScroll(rememberScrollState()).padding(14.dp)) { Text(aiReply.ifEmpty { "Думает..." }, style = MaterialTheme.typography.bodyMedium) }
             }
             Spacer(modifier = Modifier.height(10.dp))
             Row(modifier = Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
@@ -800,15 +975,12 @@ private fun InChatAiMiniWindow(
                     }
                 }
                 Spacer(modifier = Modifier.width(8.dp))
-                FilledTonalIconButton(onClick = { if (customQuestion.isNotBlank()) { val q = customQuestion.trim(); customQuestion = ""; runGeneration(q) } }, modifier = Modifier.size(44.dp)) {
-                    Icon(Icons.AutoMirrored.Rounded.Send, "Спросить")
-                }
+                FilledTonalIconButton(onClick = { if (customQuestion.isNotBlank()) { val q = customQuestion.trim(); customQuestion = ""; runGeneration(q) } }, modifier = Modifier.size(44.dp)) { Icon(Icons.AutoMirrored.Rounded.Send, "Спросить") }
             }
             Spacer(modifier = Modifier.height(12.dp))
             Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                if (hasError) {
-                    FilledTonalButton(onClick = onOpenVoltAi, modifier = Modifier.weight(1f)) { Text("Открыть Volt AI") }
-                } else {
+                if (hasError) FilledTonalButton(onClick = onOpenVoltAi, modifier = Modifier.weight(1f)) { Text("Открыть Volt AI") }
+                else {
                     OutlinedButton(onClick = { if (aiReply.isNotBlank()) clipboard.setText(AnnotatedString(aiReply)) }, enabled = aiReply.isNotBlank(), modifier = Modifier.weight(1f)) { Text("Копировать") }
                     FilledTonalButton(onClick = { onInsertIntoChat(aiReply) }, enabled = !isStreaming && aiReply.isNotBlank(), modifier = Modifier.weight(1f)) { Text("Отправить в чат") }
                 }
@@ -839,18 +1011,11 @@ private fun TelegramMessageBubble(
     onReactionClick: (String) -> Unit
 ) {
     val isMe = message.isFromMe
-    val big = cornerRadiusDp.dp
-    val mid = (cornerRadiusDp * 0.42f).dp
-    val shape = if (isMe) {
-        RoundedCornerShape(topStart = big, topEnd = if (isFirstInGroup) big else mid, bottomStart = big, bottomEnd = if (isLastInGroup) 5.dp else mid)
-    } else {
-        RoundedCornerShape(topStart = if (isFirstInGroup) big else mid, topEnd = big, bottomStart = if (isLastInGroup) 5.dp else mid, bottomEnd = big)
-    }
+    val big = cornerRadiusDp.dp; val mid = (cornerRadiusDp * 0.42f).dp
+    val shape = if (isMe) RoundedCornerShape(topStart = big, topEnd = if (isFirstInGroup) big else mid, bottomStart = big, bottomEnd = if (isLastInGroup) 5.dp else mid)
+    else RoundedCornerShape(topStart = if (isFirstInGroup) big else mid, topEnd = big, bottomStart = if (isLastInGroup) 5.dp else mid, bottomEnd = big)
 
-    Column(
-        modifier = Modifier.fillMaxWidth(),
-        horizontalAlignment = if (isMe) Alignment.End else Alignment.Start
-    ) {
+    Column(modifier = Modifier.fillMaxWidth(), horizontalAlignment = if (isMe) Alignment.End else Alignment.Start) {
         AppSurface(
             modifier = Modifier.widthIn(min = 76.dp, max = 315.dp).clip(shape).clickable(onClick = onTap),
             shape = shape,
@@ -858,10 +1023,7 @@ private fun TelegramMessageBubble(
             contentColor = if (isMe) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
         ) {
             Column(modifier = Modifier.padding(horizontal = 13.dp, vertical = 8.dp)) {
-                if (showSenderName) {
-                    Text(message.senderName, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 3.dp))
-                }
-
+                if (showSenderName) Text(message.senderName, style = MaterialTheme.typography.labelMedium, fontWeight = FontWeight.Bold, color = MaterialTheme.colorScheme.primary, modifier = Modifier.padding(bottom = 3.dp))
                 message.replyTo?.let { reply ->
                     Row(modifier = Modifier.padding(bottom = 6.dp).clip(RoundedCornerShape(10.dp)).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.35f)).padding(horizontal = 8.dp, vertical = 5.dp)) {
                         Box(modifier = Modifier.width(3.dp).height(28.dp).clip(RoundedCornerShape(2.dp)).background(MaterialTheme.colorScheme.primary))
@@ -872,15 +1034,9 @@ private fun TelegramMessageBubble(
                         }
                     }
                 }
-
                 message.attachment?.let { att ->
                     Column(
-                        modifier = Modifier
-                            .padding(bottom = if (message.text.isNotBlank()) 6.dp else 2.dp)
-                            .clip(RoundedCornerShape(14.dp))
-                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.45f))
-                            .clickable(enabled = message.transferProgress == null) { onOpenAttachment(att) }
-                            .padding(horizontal = 10.dp, vertical = 8.dp)
+                        modifier = Modifier.padding(bottom = if (message.text.isNotBlank()) 6.dp else 2.dp).clip(RoundedCornerShape(14.dp)).background(MaterialTheme.colorScheme.surface.copy(alpha = 0.45f)).clickable(enabled = message.transferProgress == null) { onOpenAttachment(att) }.padding(horizontal = 10.dp, vertical = 8.dp)
                     ) {
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             Box(modifier = Modifier.size(38.dp).clip(CircleShape).background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)), contentAlignment = Alignment.Center) {
@@ -907,58 +1063,27 @@ private fun TelegramMessageBubble(
                         }
                     }
                 }
-
-                if (message.text.isNotBlank()) {
-                    Text(text = message.text, style = MaterialTheme.typography.bodyLarge)
-                }
-
+                if (message.text.isNotBlank()) Text(text = message.text, style = MaterialTheme.typography.bodyLarge)
                 Spacer(modifier = Modifier.height(2.dp))
-
                 Row(modifier = Modifier.align(Alignment.End), verticalAlignment = Alignment.CenterVertically) {
-                    if (message.isEncrypted) {
-                        Icon(Icons.Rounded.Lock, "E2EE", tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f), modifier = Modifier.padding(end = 4.dp).size(11.dp))
-                    }
-                    Text(
-                        text = message.timeLabel,
-                        style = MaterialTheme.typography.labelSmall,
-                        color = if (isMe) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
-                    )
-                    if (isMe) {
-                        Spacer(modifier = Modifier.width(3.dp))
-                        Icon(Icons.Rounded.DoneAll, "Доставлено", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(15.dp))
-                    }
+                    if (message.isEncrypted) Icon(Icons.Rounded.Lock, "E2EE", tint = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.6f), modifier = Modifier.padding(end = 4.dp).size(11.dp))
+                    Text(message.timeLabel, style = MaterialTheme.typography.labelSmall, color = if (isMe) MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.65f) else MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f))
+                    if (isMe) { Spacer(modifier = Modifier.width(3.dp)); Icon(Icons.Rounded.DoneAll, "Доставлено", tint = MaterialTheme.colorScheme.primary, modifier = Modifier.size(15.dp)) }
                 }
             }
         }
 
-        // Пилюли реакций под сообщением
         if (message.reactions.isNotEmpty()) {
-            FlowRow(
-                modifier = Modifier.padding(top = 4.dp, start = 4.dp, end = 4.dp),
-                horizontalArrangement = Arrangement.spacedBy(5.dp),
-                verticalArrangement = Arrangement.spacedBy(4.dp)
-            ) {
+            FlowRow(modifier = Modifier.padding(top = 4.dp, start = 4.dp, end = 4.dp), horizontalArrangement = Arrangement.spacedBy(5.dp), verticalArrangement = Arrangement.spacedBy(4.dp)) {
                 message.reactions.forEach { (emoji, count) ->
                     if (count > 0) {
                         val isMine = emoji in message.myReactions
                         Row(
-                            modifier = Modifier
-                                .clip(RoundedCornerShape(14.dp))
-                                .background(if (isMine) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh)
-                                .clickable { onReactionClick(emoji) }
-                                .padding(horizontal = 8.dp, vertical = 3.dp),
+                            modifier = Modifier.clip(RoundedCornerShape(14.dp)).background(if (isMine) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainerHigh).clickable { onReactionClick(emoji) }.padding(horizontal = 8.dp, vertical = 3.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
                             Text(emoji, style = MaterialTheme.typography.bodySmall)
-                            if (count > 1) {
-                                Spacer(modifier = Modifier.width(3.dp))
-                                Text(
-                                    text = count.toString(),
-                                    style = MaterialTheme.typography.labelSmall,
-                                    fontWeight = FontWeight.SemiBold,
-                                    color = if (isMine) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant
-                                )
-                            }
+                            if (count > 1) { Spacer(modifier = Modifier.width(3.dp)); Text(count.toString(), style = MaterialTheme.typography.labelSmall, fontWeight = FontWeight.SemiBold, color = if (isMine) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurfaceVariant) }
                         }
                     }
                 }
@@ -983,19 +1108,12 @@ private fun WavyVoiceMessageBubble(
     else RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 5.dp, bottomEnd = 20.dp)
 
     Row(modifier = Modifier.fillMaxWidth(), horizontalArrangement = if (isMe) Arrangement.End else Arrangement.Start) {
-        AppSurface(
-            modifier = Modifier.widthIn(max = 315.dp).clip(shape).clickable(onClick = onTap),
-            shape = shape,
-            color = if (isMe) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer,
-            contentColor = if (isMe) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface
-        ) {
+        AppSurface(modifier = Modifier.widthIn(max = 315.dp).clip(shape).clickable(onClick = onTap), shape = shape, color = if (isMe) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surfaceContainer, contentColor = if (isMe) MaterialTheme.colorScheme.onPrimaryContainer else MaterialTheme.colorScheme.onSurface) {
             Row(modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 10.dp), verticalAlignment = Alignment.CenterVertically) {
                 FilledTonalIconButton(onClick = onTogglePlay, enabled = message.transferProgress == null && !message.attachment?.localPath.isNullOrEmpty(), modifier = Modifier.size(44.dp)) {
-                    AnimatedContent(
-                        targetState = isPlaying,
-                        transitionSpec = { (scaleIn(initialScale = 0.72f, animationSpec = spring(dampingRatio = 0.65f, stiffness = 500f)) + fadeIn(tween(130))) togetherWith (scaleOut(targetScale = 0.72f, animationSpec = tween(100)) + fadeOut(tween(100))) },
-                        label = "voicePlayPause"
-                    ) { playing -> Icon(if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, "Воспроизвести") }
+                    AnimatedContent(targetState = isPlaying, transitionSpec = { (scaleIn(initialScale = 0.72f) + fadeIn(tween(130))) togetherWith (scaleOut(targetScale = 0.72f) + fadeOut(tween(100))) }, label = "voicePlayPause") { playing ->
+                        Icon(if (playing) Icons.Rounded.Pause else Icons.Rounded.PlayArrow, "Воспроизвести")
+                    }
                 }
                 Spacer(modifier = Modifier.width(10.dp))
                 Column(modifier = Modifier.weight(1f)) {

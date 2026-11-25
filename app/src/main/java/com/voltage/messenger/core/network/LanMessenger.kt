@@ -20,6 +20,7 @@ import com.voltage.messenger.model.CallStatus
 import com.voltage.messenger.model.ChannelMeta
 import com.voltage.messenger.model.LanCallState
 import com.voltage.messenger.model.LanPeer
+import com.voltage.messenger.model.PollData
 import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -32,6 +33,7 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.BufferedInputStream
 import java.io.BufferedOutputStream
@@ -59,6 +61,7 @@ data class IncomingLanEvent(
     val text: String,
     val timestamp: Long,
     val attachment: AttachmentInfo? = null,
+    val poll: PollData? = null,
     val progress: Float? = null,
     val speedMbps: Float? = null,
     val isEncrypted: Boolean = true,
@@ -68,7 +71,9 @@ data class IncomingLanEvent(
     val channelName: String? = null,
     val channelOwnerId: String? = null,
     val reactionEmoji: String? = null,
-    val reactionDelta: Int = 0
+    val reactionDelta: Int = 0,
+    val pollVoteOption: Int? = null,
+    val pollVoteDelta: Int = 0
 )
 
 class LanMessenger(
@@ -115,13 +120,9 @@ class LanMessenger(
     fun start() {
         if (isStarted) return
         isStarted = true
-
         try {
             val wifi = context.applicationContext.getSystemService(Context.WIFI_SERVICE) as? WifiManager
-            multicastLock = wifi?.createMulticastLock("volt_lan_lock")?.apply {
-                setReferenceCounted(true)
-                acquire()
-            }
+            multicastLock = wifi?.createMulticastLock("volt_lan_lock")?.apply { setReferenceCounted(true); acquire() }
         } catch (_: Exception) {}
 
         scope.launch {
@@ -141,9 +142,7 @@ class LanMessenger(
                     val client = try { socket.accept() } catch (_: Exception) { break }
                     launch { handleIncomingTcp(client) }
                 }
-            } catch (_: Exception) {
-                _isLanActive.value = false
-            }
+            } catch (_: Exception) { _isLanActive.value = false }
         }
     }
 
@@ -170,32 +169,20 @@ class LanMessenger(
         _isLanActive.value = false
         _localPort.value = 0
         endCall()
-
         try { discoveryListener?.let { nsdManager?.stopServiceDiscovery(it) } } catch (_: Exception) {}
         try { registrationListener?.let { nsdManager?.unregisterService(it) } } catch (_: Exception) {}
         try { serverSocket?.close() } catch (_: Exception) {}
         try { udpSocket?.close() } catch (_: Exception) {}
         try { if (multicastLock?.isHeld == true) multicastLock?.release() } catch (_: Exception) {}
-
-        serverSocket = null
-        udpSocket = null
-        discoveryListener = null
-        registrationListener = null
+        serverSocket = null; udpSocket = null; discoveryListener = null; registrationListener = null
     }
 
-    fun destroy() {
-        stop()
-        scope.cancel()
-    }
+    fun destroy() { stop(); scope.cancel() }
 
     private fun startUdpDiscovery(tcpPort: Int) {
         scope.launch {
             try {
-                val ds = DatagramSocket(null).apply {
-                    reuseAddress = true
-                    broadcast = true
-                    bind(InetSocketAddress(udpPort))
-                }
+                val ds = DatagramSocket(null).apply { reuseAddress = true; broadcast = true; bind(InetSocketAddress(udpPort)) }
                 udpSocket = ds
                 val buf = ByteArray(1024)
                 while (isActive && !ds.isClosed) {
@@ -219,15 +206,7 @@ class LanMessenger(
                         publishPeers()
 
                         if (isNew || json.optBoolean("needReply", false)) {
-                            val reply = JSONObject()
-                                .put("magic", "VOLT_LAN_V1")
-                                .put("id", shortId)
-                                .put("nick", myNickname)
-                                .put("srv", myServerName)
-                                .put("port", tcpPort)
-                                .put("needReply", false)
-                                .toString()
-                                .toByteArray(Charsets.UTF_8)
+                            val reply = JSONObject().put("magic", "VOLT_LAN_V1").put("id", shortId).put("nick", myNickname).put("srv", myServerName).put("port", tcpPort).put("needReply", false).toString().toByteArray(Charsets.UTF_8)
                             try { ds.send(DatagramPacket(reply, reply.size, packet.address, udpPort)) } catch (_: Exception) {}
                         }
                     } catch (_: Exception) {}
@@ -238,33 +217,19 @@ class LanMessenger(
         scope.launch {
             while (isActive && isStarted) {
                 _localIp.value = detectLocalIpv4()
-                val data = JSONObject()
-                    .put("magic", "VOLT_LAN_V1")
-                    .put("id", shortId)
-                    .put("nick", myNickname)
-                    .put("srv", myServerName)
-                    .put("port", tcpPort)
-                    .put("needReply", true)
-                    .toString()
-                    .toByteArray(Charsets.UTF_8)
-
-                val targets = collectBroadcastAddresses()
+                val data = JSONObject().put("magic", "VOLT_LAN_V1").put("id", shortId).put("nick", myNickname).put("srv", myServerName).put("port", tcpPort).put("needReply", true).toString().toByteArray(Charsets.UTF_8)
                 val ds = udpSocket
                 if (ds != null && !ds.isClosed) {
-                    for (addr in targets) {
+                    for (addr in collectBroadcastAddresses()) {
                         try { ds.send(DatagramPacket(data, data.size, addr, udpPort)) } catch (_: Exception) {}
                     }
                 }
-
                 val now = System.currentTimeMillis()
                 var changed = false
                 val it = peersMap.entries.iterator()
                 while (it.hasNext()) {
                     val entry = it.next()
-                    if (entry.value.lastSeenMs != Long.MAX_VALUE && now - entry.value.lastSeenMs > 15_000L) {
-                        it.remove()
-                        changed = true
-                    }
+                    if (entry.value.lastSeenMs != Long.MAX_VALUE && now - entry.value.lastSeenMs > 15_000L) { it.remove(); changed = true }
                 }
                 if (changed) publishPeers()
                 delay(2200L)
@@ -307,180 +272,123 @@ class LanMessenger(
                 }
             }
             return fallback
-        } catch (_: Exception) {
-            return "127.0.0.1"
-        }
+        } catch (_: Exception) { return "127.0.0.1" }
     }
 
-    private fun publishPeers() {
-        _peers.value = peersMap.values.sortedBy { it.nickname.lowercase() }
-    }
+    private fun publishPeers() { _peers.value = peersMap.values.sortedBy { it.nickname.lowercase() } }
 
-    suspend fun sendTextMessage(
-        peer: LanPeer,
-        messageId: String,
-        text: String,
-        groupId: String? = null,
-        groupName: String? = null,
-        channelId: String? = null,
-        channelName: String? = null
-    ): Boolean = withContext(Dispatchers.IO) {
+    suspend fun sendTextMessage(peer: LanPeer, messageId: String, text: String, groupId: String? = null, groupName: String? = null, channelId: String? = null, channelName: String? = null): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
             Socket().use { socket ->
                 socket.tcpNoDelay = true
                 socket.connect(InetSocketAddress(peer.host, peer.port), 3000)
-                val inp = DataInputStream(BufferedInputStream(socket.getInputStream(), 65536))
-                val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 65536))
-                val ch = VoltCrypto.handshake(inp, out, isClient = true)
+                val ch = VoltCrypto.handshake(DataInputStream(BufferedInputStream(socket.getInputStream(), 32768)), DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 32768)), true)
+                val header = JSONObject().put("type", "text").put("msgId", messageId).put("peerId", shortId).put("senderName", myNickname).put("serverName", myServerName).put("text", text).put("ts", System.currentTimeMillis())
+                if (groupId != null) header.put("groupId", groupId)
+                if (groupName != null) header.put("groupName", groupName)
+                if (channelId != null) { header.put("channelId", channelId); header.put("channelName", channelName ?: "Канал"); header.put("channelOwnerId", shortId) }
+                ch.writeFrame(header.toString().toByteArray(Charsets.UTF_8)); ch.flush()
+            }
+            true
+        } catch (_: Exception) { false }
+    }
 
+    suspend fun sendPollMessage(peer: LanPeer, messageId: String, poll: PollData, groupId: String? = null, groupName: String? = null, channelId: String? = null, channelName: String? = null): Boolean = withContext(Dispatchers.IO) {
+        return@withContext try {
+            Socket().use { socket ->
+                socket.tcpNoDelay = true
+                socket.connect(InetSocketAddress(peer.host, peer.port), 3000)
+                val ch = VoltCrypto.handshake(DataInputStream(BufferedInputStream(socket.getInputStream(), 32768)), DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 32768)), true)
                 val header = JSONObject()
-                    .put("type", "text")
+                    .put("type", "poll")
                     .put("msgId", messageId)
                     .put("peerId", shortId)
                     .put("senderName", myNickname)
                     .put("serverName", myServerName)
-                    .put("text", text)
+                    .put("question", poll.question)
+                    .put("options", JSONArray().apply { poll.options.forEach { put(it) } })
+                    .put("isAnonymous", poll.isAnonymous)
+                    .put("allowsMultiple", poll.allowsMultiple)
                     .put("ts", System.currentTimeMillis())
                 if (groupId != null) header.put("groupId", groupId)
                 if (groupName != null) header.put("groupName", groupName)
-                if (channelId != null) {
-                    header.put("channelId", channelId)
-                    header.put("channelName", channelName ?: "Канал")
-                    header.put("channelOwnerId", shortId)
-                }
-
-                ch.writeFrame(header.toString().toByteArray(Charsets.UTF_8))
-                ch.flush()
+                if (channelId != null) { header.put("channelId", channelId); header.put("channelName", channelName ?: "Канал"); header.put("channelOwnerId", shortId) }
+                ch.writeFrame(header.toString().toByteArray(Charsets.UTF_8)); ch.flush()
             }
             true
-        } catch (_: Exception) {
-            false
-        }
+        } catch (_: Exception) { false }
     }
 
-    suspend fun sendReaction(
-        peer: LanPeer,
-        messageId: String,
-        emoji: String,
-        delta: Int,
-        groupId: String? = null,
-        channelId: String? = null
-    ): Boolean = withContext(Dispatchers.IO) {
+    suspend fun sendPollVote(peer: LanPeer, messageId: String, optionIndex: Int, delta: Int, groupId: String? = null, channelId: String? = null): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
             Socket().use { socket ->
                 socket.tcpNoDelay = true
                 socket.connect(InetSocketAddress(peer.host, peer.port), 2500)
-                val inp = DataInputStream(BufferedInputStream(socket.getInputStream(), 16384))
-                val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 16384))
-                val ch = VoltCrypto.handshake(inp, out, isClient = true)
-
-                val header = JSONObject()
-                    .put("type", "reaction")
-                    .put("msgId", messageId)
-                    .put("peerId", shortId)
-                    .put("senderName", myNickname)
-                    .put("emoji", emoji)
-                    .put("delta", delta)
+                val ch = VoltCrypto.handshake(DataInputStream(BufferedInputStream(socket.getInputStream(), 16384)), DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 16384)), true)
+                val header = JSONObject().put("type", "poll_vote").put("msgId", messageId).put("peerId", shortId).put("senderName", myNickname).put("optionIndex", optionIndex).put("delta", delta)
                 if (groupId != null) header.put("groupId", groupId)
                 if (channelId != null) header.put("channelId", channelId)
-
-                ch.writeFrame(header.toString().toByteArray(Charsets.UTF_8))
-                ch.flush()
+                ch.writeFrame(header.toString().toByteArray(Charsets.UTF_8)); ch.flush()
             }
             true
-        } catch (_: Exception) {
-            false
-        }
+        } catch (_: Exception) { false }
     }
 
-    suspend fun sendFileMessage(
-        peer: LanPeer,
-        messageId: String,
-        caption: String,
-        attachment: AttachmentInfo,
-        groupId: String? = null,
-        groupName: String? = null,
-        channelId: String? = null,
-        channelName: String? = null,
-        onProgress: (progress: Float, speedMbps: Float) -> Unit
-    ): Boolean = withContext(Dispatchers.IO) {
+    suspend fun sendReaction(peer: LanPeer, messageId: String, emoji: String, delta: Int, groupId: String? = null, channelId: String? = null): Boolean = withContext(Dispatchers.IO) {
+        return@withContext try {
+            Socket().use { socket ->
+                socket.tcpNoDelay = true
+                socket.connect(InetSocketAddress(peer.host, peer.port), 2500)
+                val ch = VoltCrypto.handshake(DataInputStream(BufferedInputStream(socket.getInputStream(), 16384)), DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 16384)), true)
+                val header = JSONObject().put("type", "reaction").put("msgId", messageId).put("peerId", shortId).put("senderName", myNickname).put("emoji", emoji).put("delta", delta)
+                if (groupId != null) header.put("groupId", groupId)
+                if (channelId != null) header.put("channelId", channelId)
+                ch.writeFrame(header.toString().toByteArray(Charsets.UTF_8)); ch.flush()
+            }
+            true
+        } catch (_: Exception) { false }
+    }
+
+    suspend fun sendFileMessage(peer: LanPeer, messageId: String, caption: String, attachment: AttachmentInfo, groupId: String? = null, groupName: String? = null, channelId: String? = null, channelName: String? = null, onProgress: (Float, Float) -> Unit): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
             val totalSize = when {
                 attachment.localPath.isNotEmpty() && File(attachment.localPath).exists() -> File(attachment.localPath).length()
                 attachment.sizeBytes > 0L -> attachment.sizeBytes
                 else -> 0L
             }
-
             Socket().use { socket ->
-                socket.tcpNoDelay = true
-                socket.sendBufferSize = 512 * 1024
+                socket.tcpNoDelay = true; socket.sendBufferSize = 512 * 1024
                 socket.connect(InetSocketAddress(peer.host, peer.port), 4000)
-
-                val inp = DataInputStream(BufferedInputStream(socket.getInputStream(), 65536))
-                val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 256 * 1024))
-                val ch = VoltCrypto.handshake(inp, out, isClient = true)
-
-                val header = JSONObject()
-                    .put("type", "file")
-                    .put("msgId", messageId)
-                    .put("peerId", shortId)
-                    .put("senderName", myNickname)
-                    .put("serverName", myServerName)
-                    .put("text", caption)
-                    .put("fileName", attachment.name)
-                    .put("mimeType", attachment.mimeType)
-                    .put("fileSize", totalSize)
-                    .put("isVoice", attachment.isVoice)
-                    .put("durationSec", attachment.durationSec)
-                    .put("ts", System.currentTimeMillis())
+                val ch = VoltCrypto.handshake(DataInputStream(BufferedInputStream(socket.getInputStream(), 65536)), DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 256 * 1024)), true)
+                val header = JSONObject().put("type", "file").put("msgId", messageId).put("peerId", shortId).put("senderName", myNickname).put("serverName", myServerName).put("text", caption).put("fileName", attachment.name).put("mimeType", attachment.mimeType).put("fileSize", totalSize).put("isVoice", attachment.isVoice).put("durationSec", attachment.durationSec).put("ts", System.currentTimeMillis())
                 if (groupId != null) header.put("groupId", groupId)
                 if (groupName != null) header.put("groupName", groupName)
-                if (channelId != null) {
-                    header.put("channelId", channelId)
-                    header.put("channelName", channelName ?: "Канал")
-                    header.put("channelOwnerId", shortId)
-                }
+                if (channelId != null) { header.put("channelId", channelId); header.put("channelName", channelName ?: "Канал"); header.put("channelOwnerId", shortId) }
+                ch.writeFrame(header.toString().toByteArray(Charsets.UTF_8)); ch.flush()
 
-                ch.writeFrame(header.toString().toByteArray(Charsets.UTF_8))
-                ch.flush()
-
-                val stream = if (attachment.localPath.isNotEmpty() && File(attachment.localPath).exists()) {
-                    FileInputStream(attachment.localPath)
-                } else {
-                    val uri = Uri.parse(attachment.uriString ?: return@withContext false)
-                    context.contentResolver.openInputStream(uri) ?: return@withContext false
-                }
+                val stream = if (attachment.localPath.isNotEmpty() && File(attachment.localPath).exists()) FileInputStream(attachment.localPath)
+                else context.contentResolver.openInputStream(Uri.parse(attachment.uriString ?: return@withContext false)) ?: return@withContext false
 
                 stream.use { fileIn ->
                     val buffer = ByteArray(256 * 1024)
-                    var sent = 0L
-                    val startMs = System.currentTimeMillis()
-                    var lastReportMs = 0L
-
+                    var sent = 0L; val startMs = System.currentTimeMillis(); var lastReportMs = 0L
                     while (true) {
                         val read = fileIn.read(buffer)
                         if (read <= 0) break
-                        ch.writeFrame(buffer, read)
-                        sent += read
-
+                        ch.writeFrame(buffer, read); sent += read
                         val now = System.currentTimeMillis()
                         if (now - lastReportMs >= 120L) {
-                            val elapsedSec = ((now - startMs).coerceAtLeast(1L)) / 1000f
-                            val mbps = (sent / (1024f * 1024f)) / elapsedSec
-                            val frac = if (totalSize > 0L) (sent.toFloat() / totalSize.toFloat()).coerceIn(0f, 0.99f) else 0.5f
-                            onProgress(frac, mbps)
+                            val mbps = (sent / (1024f * 1024f)) / (((now - startMs).coerceAtLeast(1L)) / 1000f)
+                            onProgress(if (totalSize > 0L) (sent.toFloat() / totalSize.toFloat()).coerceIn(0f, 0.99f) else 0.5f, mbps)
                             lastReportMs = now
                         }
                     }
-                    ch.writeFrame(ByteArray(0), 0)
-                    ch.flush()
+                    ch.writeFrame(ByteArray(0), 0); ch.flush()
                 }
                 onProgress(1f, 0f)
             }
             true
-        } catch (_: Exception) {
-            false
-        }
+        } catch (_: Exception) { false }
     }
 
     fun startCall(peer: LanPeer) {
@@ -488,26 +396,12 @@ class LanMessenger(
         _callState.value = LanCallState(CallStatus.OUTGOING, peer.id, peer.nickname)
         scope.launch {
             try {
-                val socket = Socket()
-                socket.tcpNoDelay = true
-                socket.connect(InetSocketAddress(peer.host, peer.port), 4000)
+                val socket = Socket(); socket.tcpNoDelay = true; socket.connect(InetSocketAddress(peer.host, peer.port), 4000)
                 activeCallSocket = socket
-                val inp = DataInputStream(BufferedInputStream(socket.getInputStream(), 32768))
-                val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 32768))
-                val ch = VoltCrypto.handshake(inp, out, isClient = true)
-
-                val req = JSONObject()
-                    .put("type", "call_audio")
-                    .put("peerId", shortId)
-                    .put("senderName", myNickname)
-                    .put("serverName", myServerName)
-                ch.writeFrame(req.toString().toByteArray(Charsets.UTF_8))
-                ch.flush()
+                val ch = VoltCrypto.handshake(DataInputStream(BufferedInputStream(socket.getInputStream(), 32768)), DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 32768)), true)
+                ch.writeFrame(JSONObject().put("type", "call_audio").put("peerId", shortId).put("senderName", myNickname).put("serverName", myServerName).toString().toByteArray(Charsets.UTF_8)); ch.flush()
                 _callState.value = _callState.value.copy(sessionEmojis = ch.sessionEmojis)
-
-                val respJson = JSONObject(String(ch.readFrame(), Charsets.UTF_8))
-                if (respJson.optString("status") != "accept") { endCall(); return@launch }
-
+                if (JSONObject(String(ch.readFrame(), Charsets.UTF_8)).optString("status") != "accept") { endCall(); return@launch }
                 _callState.value = _callState.value.copy(status = CallStatus.CONNECTED, connectedAtMs = System.currentTimeMillis())
                 runFullDuplexAudioCall(socket, ch)
             } catch (_: Exception) { endCall() }
@@ -517,29 +411,17 @@ class LanMessenger(
     fun acceptIncomingCall() { incomingCallDecision?.complete(true) }
     fun declineIncomingCall() { incomingCallDecision?.complete(false); endCall() }
     fun toggleMute() { _callState.value = _callState.value.copy(isMuted = !_callState.value.isMuted) }
-
     fun toggleSpeaker() {
         val next = !_callState.value.isSpeaker
         _callState.value = _callState.value.copy(isSpeaker = next)
-        try {
-            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            am?.mode = AudioManager.MODE_IN_COMMUNICATION
-            @Suppress("DEPRECATION")
-            am?.isSpeakerphoneOn = next
-        } catch (_: Exception) {}
+        try { val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager; am?.mode = AudioManager.MODE_IN_COMMUNICATION; @Suppress("DEPRECATION") am?.isSpeakerphoneOn = next } catch (_: Exception) {}
     }
 
     fun endCall() {
-        incomingCallDecision?.complete(false)
-        incomingCallDecision = null
+        incomingCallDecision?.complete(false); incomingCallDecision = null
         try { activeCallSocket?.close() } catch (_: Exception) {}
         activeCallSocket = null
-        try {
-            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            am?.mode = AudioManager.MODE_NORMAL
-            @Suppress("DEPRECATION")
-            am?.isSpeakerphoneOn = false
-        } catch (_: Exception) {}
+        try { val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager; am?.mode = AudioManager.MODE_NORMAL; @Suppress("DEPRECATION") am?.isSpeakerphoneOn = false } catch (_: Exception) {}
         _callState.value = LanCallState()
     }
 
@@ -548,30 +430,20 @@ class LanMessenger(
         val sampleRate = 16000
         val minRec = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(2560)
         val minPlay = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(2560)
-        var recorder: AudioRecord? = null
-        var track: AudioTrack? = null
+        var recorder: AudioRecord? = null; var track: AudioTrack? = null
         try {
-            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
-            am?.mode = AudioManager.MODE_IN_COMMUNICATION
+            (context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager)?.mode = AudioManager.MODE_IN_COMMUNICATION
             recorder = AudioRecord(MediaRecorder.AudioSource.VOICE_COMMUNICATION, sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT, minRec * 2)
             track = AudioTrack.Builder()
                 .setAudioAttributes(AudioAttributes.Builder().setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION).setContentType(AudioAttributes.CONTENT_TYPE_SPEECH).build())
                 .setAudioFormat(AudioFormat.Builder().setEncoding(AudioFormat.ENCODING_PCM_16BIT).setSampleRate(sampleRate).setChannelMask(AudioFormat.CHANNEL_OUT_MONO).build())
-                .setBufferSizeInBytes(minPlay * 2)
-                .setTransferMode(AudioTrack.MODE_STREAM)
-                .build()
-            recorder.startRecording()
-            track.play()
-
+                .setBufferSizeInBytes(minPlay * 2).setTransferMode(AudioTrack.MODE_STREAM).build()
+            recorder.startRecording(); track.play()
             val sendJob = scope.launch {
-                val pcm = ByteArray(1280)
-                val silence = ByteArray(1280)
+                val pcm = ByteArray(1280); val silence = ByteArray(1280)
                 while (!socket.isClosed && _callState.value.status == CallStatus.CONNECTED) {
                     val read = recorder.read(pcm, 0, pcm.size)
-                    if (read > 0) {
-                        val toSend = if (_callState.value.isMuted) silence else pcm
-                        try { ch.writeFrame(toSend, read); ch.flush() } catch (_: Exception) { break }
-                    }
+                    if (read > 0) { try { ch.writeFrame(if (_callState.value.isMuted) silence else pcm, read); ch.flush() } catch (_: Exception) { break } }
                 }
             }
             while (!socket.isClosed && _callState.value.status == CallStatus.CONNECTED) {
@@ -581,22 +453,16 @@ class LanMessenger(
             sendJob.cancel()
         } catch (_: Exception) {
         } finally {
-            try { recorder?.stop() } catch (_: Exception) {}
-            try { recorder?.release() } catch (_: Exception) {}
-            try { track?.stop() } catch (_: Exception) {}
-            try { track?.release() } catch (_: Exception) {}
+            try { recorder?.stop() } catch (_: Exception) {}; try { recorder?.release() } catch (_: Exception) {}
+            try { track?.stop() } catch (_: Exception) {}; try { track?.release() } catch (_: Exception) {}
             endCall()
         }
     }
 
     private suspend fun handleIncomingTcp(client: Socket) {
         try {
-            client.tcpNoDelay = true
-            client.receiveBufferSize = 512 * 1024
-            val inp = DataInputStream(BufferedInputStream(client.getInputStream(), 256 * 1024))
-            val out = DataOutputStream(BufferedOutputStream(client.getOutputStream(), 65536))
-            val ch = VoltCrypto.handshake(inp, out, isClient = false)
-
+            client.tcpNoDelay = true; client.receiveBufferSize = 512 * 1024
+            val ch = VoltCrypto.handshake(DataInputStream(BufferedInputStream(client.getInputStream(), 256 * 1024)), DataOutputStream(BufferedOutputStream(client.getOutputStream(), 65536)), false)
             val headerJson = JSONObject(String(ch.readFrame(), Charsets.UTF_8))
             val type = headerJson.optString("type")
             val msgId = headerJson.optString("msgId").ifBlank { UUID.randomUUID().toString() }
@@ -612,15 +478,33 @@ class LanMessenger(
 
             if (peerId.isNotEmpty()) storage.saveKnownPeerName(peerId, senderName, serverName)
             if (groupId != null && groupName != null) storage.saveKnownGroup(groupId, groupName)
-            if (channelId != null && channelName != null) {
-                storage.saveChannel(ChannelMeta(channelId, channelName, channelOwnerId ?: peerId))
-            }
+            if (channelId != null && channelName != null) storage.saveChannel(ChannelMeta(channelId, channelName, channelOwnerId ?: peerId))
 
             when (type) {
                 "text" -> {
                     val text = headerJson.optString("text")
                     if (peerId.isNotEmpty() && text.isNotEmpty()) {
                         onEvent(IncomingLanEvent(msgId, peerId, senderName, serverName, text, ts, groupId = groupId, groupName = groupName, channelId = channelId, channelName = channelName, channelOwnerId = channelOwnerId))
+                    }
+                    client.close()
+                }
+
+                "poll" -> {
+                    val question = headerJson.optString("question")
+                    val opts = mutableListOf<String>()
+                    headerJson.optJSONArray("options")?.let { arr -> for (i in 0 until arr.length()) opts.add(arr.optString(i)) }
+                    if (peerId.isNotEmpty() && question.isNotEmpty() && opts.size >= 2) {
+                        val poll = PollData(question, opts, isAnonymous = headerJson.optBoolean("isAnonymous", true), allowsMultiple = headerJson.optBoolean("allowsMultiple", false))
+                        onEvent(IncomingLanEvent(msgId, peerId, senderName, serverName, "", ts, poll = poll, groupId = groupId, groupName = groupName, channelId = channelId, channelName = channelName, channelOwnerId = channelOwnerId))
+                    }
+                    client.close()
+                }
+
+                "poll_vote" -> {
+                    val optIdx = headerJson.optInt("optionIndex", -1)
+                    val delta = headerJson.optInt("delta", 1)
+                    if (peerId.isNotEmpty() && optIdx >= 0) {
+                        onEvent(IncomingLanEvent(msgId, peerId, senderName, serverName, "", ts, groupId = groupId, channelId = channelId, pollVoteOption = optIdx, pollVoteDelta = delta))
                     }
                     client.close()
                 }
@@ -641,78 +525,56 @@ class LanMessenger(
                     val expectedSize = headerJson.optLong("fileSize", 0L)
                     val isVoice = headerJson.optBoolean("isVoice", false)
                     val durationSec = headerJson.optInt("durationSec", 0)
-
                     val outFile = storage.createIncomingFile(fileName)
                     val baseAtt = AttachmentInfo(fileName, outFile.absolutePath, mimeType, expectedSize, isVoice = isVoice, durationSec = durationSec)
 
-                    onEvent(IncomingLanEvent(msgId, peerId, senderName, serverName, caption, ts, baseAtt, 0f, 0f, true, groupId, groupName, channelId, channelName, channelOwnerId))
+                    onEvent(IncomingLanEvent(msgId, peerId, senderName, serverName, caption, ts, baseAtt, progress = 0f, speedMbps = 0f, groupId = groupId, groupName = groupName, channelId = channelId, channelName = channelName, channelOwnerId = channelOwnerId))
 
-                    var received = 0L
-                    val startMs = System.currentTimeMillis()
-                    var lastReportMs = 0L
-
+                    var received = 0L; val startMs = System.currentTimeMillis(); var lastReportMs = 0L
                     FileOutputStream(outFile).use { fos ->
                         while (true) {
                             val chunk = ch.readFrame(maxSize = 2 * 1024 * 1024)
                             if (chunk.isEmpty()) break
-                            fos.write(chunk)
-                            received += chunk.size
+                            fos.write(chunk); received += chunk.size
                             val now = System.currentTimeMillis()
                             if (now - lastReportMs >= 140L) {
-                                val elapsedSec = ((now - startMs).coerceAtLeast(1L)) / 1000f
-                                val mbps = (received / (1024f * 1024f)) / elapsedSec
+                                val mbps = (received / (1024f * 1024f)) / (((now - startMs).coerceAtLeast(1L)) / 1000f)
                                 val frac = if (expectedSize > 0L) (received.toFloat() / expectedSize.toFloat()).coerceIn(0f, 0.99f) else 0.5f
-                                onEvent(IncomingLanEvent(msgId, peerId, senderName, serverName, caption, ts, baseAtt.copy(sizeBytes = maxOf(expectedSize, received)), frac, mbps, true, groupId, groupName, channelId, channelName, channelOwnerId))
+                                onEvent(IncomingLanEvent(msgId, peerId, senderName, serverName, caption, ts, baseAtt.copy(sizeBytes = maxOf(expectedSize, received)), progress = frac, speedMbps = mbps, groupId = groupId, groupName = groupName, channelId = channelId, channelName = channelName, channelOwnerId = channelOwnerId))
                                 lastReportMs = now
                             }
                         }
                     }
-
                     if (!isVoice) storage.exportToPublicDownloads(outFile, fileName, mimeType)
-                    onEvent(IncomingLanEvent(msgId, peerId, senderName, serverName, caption, ts, baseAtt.copy(sizeBytes = outFile.length()), null, null, true, groupId, groupName, channelId, channelName, channelOwnerId))
+                    onEvent(IncomingLanEvent(msgId, peerId, senderName, serverName, caption, ts, baseAtt.copy(sizeBytes = outFile.length()), progress = null, speedMbps = null, groupId = groupId, groupName = groupName, channelId = channelId, channelName = channelName, channelOwnerId = channelOwnerId))
                     client.close()
                 }
 
                 "call_audio" -> {
-                    if (_callState.value.status != CallStatus.IDLE) {
-                        ch.writeFrame(JSONObject().put("status", "busy").toString().toByteArray(Charsets.UTF_8))
-                        ch.flush()
-                        client.close()
-                        return
-                    }
+                    if (_callState.value.status != CallStatus.IDLE) { ch.writeFrame(JSONObject().put("status", "busy").toString().toByteArray(Charsets.UTF_8)); ch.flush(); client.close(); return }
                     activeCallSocket = client
                     val decision = CompletableDeferred<Boolean>()
                     incomingCallDecision = decision
                     _callState.value = LanCallState(CallStatus.INCOMING, peerId, senderName, sessionEmojis = ch.sessionEmojis)
-
                     val accepted = decision.await()
-                    if (!accepted) {
-                        try { ch.writeFrame(JSONObject().put("status", "reject").toString().toByteArray(Charsets.UTF_8)); ch.flush() } catch (_: Exception) {}
-                        endCall()
-                        return
-                    }
-                    ch.writeFrame(JSONObject().put("status", "accept").toString().toByteArray(Charsets.UTF_8))
-                    ch.flush()
+                    if (!accepted) { try { ch.writeFrame(JSONObject().put("status", "reject").toString().toByteArray(Charsets.UTF_8)); ch.flush() } catch (_: Exception) {}; endCall(); return }
+                    ch.writeFrame(JSONObject().put("status", "accept").toString().toByteArray(Charsets.UTF_8)); ch.flush()
                     _callState.value = _callState.value.copy(status = CallStatus.CONNECTED, connectedAtMs = System.currentTimeMillis())
                     runFullDuplexAudioCall(client, ch)
                 }
 
                 else -> client.close()
             }
-        } catch (_: Exception) {
-            try { client.close() } catch (_: Exception) {}
-        }
+        } catch (_: Exception) { try { client.close() } catch (_: Exception) {} }
     }
 
-    private fun sanitizePart(raw: String, fallback: String): String {
-        return raw.replace("--", "-").replace(Regex("[^a-zA-Z0-9а-яА-ЯёЁ _-]"), "").trim().take(14).ifEmpty { fallback }
-    }
+    private fun sanitizePart(raw: String, fallback: String): String =
+        raw.replace("--", "-").replace(Regex("[^a-zA-Z0-9а-яА-ЯёЁ _-]"), "").trim().take(14).ifEmpty { fallback }
 
     private fun registerNsdService(port: Int) {
         val info = NsdServiceInfo().apply {
             serviceName = "VM_${shortId}_${sanitizePart(myServerName, "VoltNode")}--${sanitizePart(myNickname, "User")}"
-            serviceType = this@LanMessenger.serviceType
-            setPort(port)
+            serviceType = this@LanMessenger.serviceType; setPort(port)
         }
         val listener = object : NsdManager.RegistrationListener {
             override fun onServiceRegistered(nsdServiceInfo: NsdServiceInfo) { registeredName = nsdServiceInfo.serviceName }
@@ -728,9 +590,7 @@ class LanMessenger(
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String) {}
             override fun onServiceFound(service: NsdServiceInfo) {
-                if (!service.serviceType.startsWith("_voltmessenger")) return
-                if (service.serviceName == registeredName) return
-                if (service.serviceName.startsWith("VM_${shortId}_")) return
+                if (!service.serviceType.startsWith("_voltmessenger") || service.serviceName == registeredName || service.serviceName.startsWith("VM_${shortId}_")) return
                 resolveNsdPeer(service)
             }
             override fun onServiceLost(service: NsdServiceInfo) {}
@@ -749,7 +609,6 @@ class LanMessenger(
                 override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
                 override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
                     val host = serviceInfo.host?.hostAddress ?: return
-                    val port = serviceInfo.port
                     val parts = serviceInfo.serviceName.split("_", limit = 3)
                     if (parts.size < 3 || parts[0] != "VM") return
                     val peerId = parts[1]
@@ -757,7 +616,7 @@ class LanMessenger(
                     val tail = parts[2].split("--", limit = 2)
                     val srv = tail.getOrNull(0)?.ifBlank { "Volt-Node" } ?: "Volt-Node"
                     val nick = tail.getOrNull(1)?.ifBlank { srv } ?: srv
-                    peersMap[peerId] = LanPeer(peerId, nick, srv, host, port, System.currentTimeMillis())
+                    peersMap[peerId] = LanPeer(peerId, nick, srv, host, serviceInfo.port, System.currentTimeMillis())
                     storage.saveKnownPeerName(peerId, nick, srv)
                     publishPeers()
                 }

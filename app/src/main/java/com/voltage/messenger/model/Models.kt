@@ -7,7 +7,7 @@ import java.util.Locale
 import java.util.UUID
 
 const val DEFAULT_AI_SYSTEM_PROMPT =
-    "Ты — Volt AI, встроенный локальный ассистент мессенджера Volt Messenger. Ты работаешь офлайн прямо на телефоне пользователя. Никогда не называй себя ChatGPT или OpenAI. Отвечай на русском языке, кратко и по делу."
+    "Ты — Volt AI, локальный ассистент Volt Messenger. Не называй себя ChatGPT. Отвечай кратко на русском."
 
 enum class ChatType {
     SAVED,
@@ -27,10 +27,10 @@ enum class ChatFolder(val title: String) {
 
 @Immutable
 data class AppThemeConfig(
-    val themeMode: Int = 0, // 0 = Системная, 1 = Светлая, 2 = Тёмная
-    val accentPreset: Int = 0, // 0 = Material You, 1 = Индиго, 2 = Изумруд, 3 = Аметист, 4 = Закат
+    val themeMode: Int = 0,
+    val accentPreset: Int = 0,
     val bubbleRadius: Int = 20,
-    val wallpaperStyle: Int = 1, // 0 = Чистый, 1 = Градиент, 2 = Сетка
+    val wallpaperStyle: Int = 1,
     val aiSystemPrompt: String = DEFAULT_AI_SYSTEM_PROMPT,
     val aiControlEnabled: Boolean = true,
     val relayEnabled: Boolean = false,
@@ -43,6 +43,18 @@ data class ChannelMeta(
     val title: String,
     val ownerId: String
 )
+
+@Immutable
+data class PollData(
+    val question: String,
+    val options: List<String>,
+    val votes: Map<Int, Int> = emptyMap(),
+    val myVotes: Set<Int> = emptySet(),
+    val isAnonymous: Boolean = true,
+    val allowsMultiple: Boolean = false
+) {
+    val totalVotes: Int get() = votes.values.sum()
+}
 
 @Immutable
 data class ReplyPreview(
@@ -97,6 +109,7 @@ data class ChatMessage(
     val isMediaDemo: Boolean = false,
     val replyTo: ReplyPreview? = null,
     val attachment: AttachmentInfo? = null,
+    val poll: PollData? = null,
     val transferProgress: Float? = null,
     val transferSpeedMbps: Float? = null,
     val isEncrypted: Boolean = false,

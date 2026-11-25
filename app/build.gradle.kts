@@ -4,7 +4,7 @@ plugins {
     id("org.jetbrains.kotlin.plugin.compose")
 }
 
-val buildNum = (project.findProperty("buildNumber") as String?)?.toIntOrNull() ?: 6
+val buildNum = (project.findProperty("buildNumber") as String?)?.toIntOrNull() ?: 7
 
 android {
     namespace = "com.voltage.messenger"
@@ -15,7 +15,19 @@ android {
         minSdk = 26
         targetSdk = 35
         versionCode = buildNum
-        versionName = "0.6.$buildNum"
+        versionName = "0.7.$buildNum"
+    }
+
+    signingConfigs {
+        create("voltRelease") {
+            val ks = file("volt-signing.p12")
+            if (ks.exists()) {
+                storeFile = ks
+                storePassword = "voltpass123"
+                keyAlias = "voltkey"
+                keyPassword = "voltpass123"
+            }
+        }
     }
 
     buildTypes {
@@ -23,7 +35,11 @@ android {
             isDebuggable = false
             isMinifyEnabled = false
             isShrinkResources = false
-            signingConfig = signingConfigs.getByName("debug")
+            signingConfig = if (file("volt-signing.p12").exists()) {
+                signingConfigs.getByName("voltRelease")
+            } else {
+                signingConfigs.getByName("debug")
+            }
         }
     }
 
