@@ -411,17 +411,17 @@ class LanMessenger(
     fun acceptIncomingCall() { incomingCallDecision?.complete(true) }
     fun declineIncomingCall() { incomingCallDecision?.complete(false); endCall() }
     fun toggleMute() { _callState.value = _callState.value.copy(isMuted = !_callState.value.isMuted) }
-    fun toggleSpeaker() {
+    @Suppress("DEPRECATION") fun toggleSpeaker() {
         val next = !_callState.value.isSpeaker
         _callState.value = _callState.value.copy(isSpeaker = next)
-        try { val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager; am?.mode = AudioManager.MODE_IN_COMMUNICATION; @Suppress("DEPRECATION") am?.isSpeakerphoneOn = next } catch (_: Exception) {}
+        try { val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager; am?.mode = AudioManager.MODE_IN_COMMUNICATION; am?.isSpeakerphoneOn = next } catch (_: Exception) {}
     }
 
-    fun endCall() {
+    @Suppress("DEPRECATION") fun endCall() {
         incomingCallDecision?.complete(false); incomingCallDecision = null
         try { activeCallSocket?.close() } catch (_: Exception) {}
         activeCallSocket = null
-        try { val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager; am?.mode = AudioManager.MODE_NORMAL; @Suppress("DEPRECATION") am?.isSpeakerphoneOn = false } catch (_: Exception) {}
+        try { val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager; am?.mode = AudioManager.MODE_NORMAL; am?.isSpeakerphoneOn = false } catch (_: Exception) {}
         _callState.value = LanCallState()
     }
 
