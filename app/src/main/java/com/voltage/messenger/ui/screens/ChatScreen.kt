@@ -1,5 +1,9 @@
 package com.voltage.messenger.ui.screens
 
+import android.content.Intent
+import android.widget.Toast
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.animation.AnimatedContent
 import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.core.Spring
@@ -12,10 +16,8 @@ import androidx.compose.animation.scaleIn
 import androidx.compose.animation.scaleOut
 import androidx.compose.animation.shrinkVertically
 import androidx.compose.animation.togetherWith
-import androidx.compose.foundation.ExperimentalFoundationApi
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
-import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -25,6 +27,7 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
@@ -35,14 +38,17 @@ import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.lazy.rememberLazyListState
+import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.automirrored.rounded.Reply
 import androidx.compose.material.icons.automirrored.rounded.Send
 import androidx.compose.material.icons.rounded.AttachFile
+import androidx.compose.material.icons.rounded.AudioFile
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.Call
@@ -50,10 +56,14 @@ import androidx.compose.material.icons.rounded.Close
 import androidx.compose.material.icons.rounded.ContentCopy
 import androidx.compose.material.icons.rounded.Delete
 import androidx.compose.material.icons.rounded.DoneAll
+import androidx.compose.material.icons.rounded.Image
+import androidx.compose.material.icons.rounded.InsertDriveFile
 import androidx.compose.material.icons.rounded.Mic
+import androidx.compose.material.icons.rounded.OpenInNew
 import androidx.compose.material.icons.rounded.Pause
 import androidx.compose.material.icons.rounded.PlayArrow
 import androidx.compose.material.icons.rounded.Stop
+import androidx.compose.material.icons.rounded.VideoFile
 import androidx.compose.material.icons.rounded.Videocam
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.ExperimentalMaterial3Api
@@ -61,38 +71,53 @@ import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.FilledTonalIconButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
+import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableFloatStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalClipboardManager
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
+import androidx.core.content.FileProvider
+import com.voltage.messenger.core.ai.AiChatMessage
+import com.voltage.messenger.core.ai.VoltAiClient
 import com.voltage.messenger.core.ai.VoltAiStatus
+import com.voltage.messenger.model.AttachmentInfo
 import com.voltage.messenger.model.ChatMessage
 import com.voltage.messenger.model.ChatRoom
 import com.voltage.messenger.model.ChatType
 import com.voltage.messenger.model.ReplyPreview
 import com.voltage.messenger.ui.components.WavySeekBar
+import com.voltage.messenger.ui.components.bounceClick
 import com.voltage.messenger.ui.theme.AppSurface
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.catch
+import kotlinx.coroutines.launch
+import java.io.File
 
-@OptIn(ExperimentalMaterial3Api::class, ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ChatScreen(
     chat: ChatRoom,
@@ -100,19 +125,53 @@ fun ChatScreen(
     aiStatus: VoltAiStatus,
     isAiGenerating: Boolean,
     onBack: () -> Unit,
-    onSendMessage: (text: String, replyTo: ReplyPreview?) -> Unit,
+    onSendMessage: (text: String, replyTo: ReplyPreview?, attachment: AttachmentInfo?) -> Unit,
+    onPickAttachment: (android.net.Uri) -> AttachmentInfo?,
     onStopAi: () -> Unit,
     onDeleteMessage: (ChatMessage) -> Unit,
-    onAskAiAboutMessage: (ChatMessage) -> Unit,
     onOpenVoltAi: () -> Unit
 ) {
+    val context = LocalContext.current
     val listState = rememberLazyListState()
     val clipboard = LocalClipboardManager.current
 
     var inputText by remember { mutableStateOf("") }
     var replyingTo by remember { mutableStateOf<ReplyPreview?>(null) }
+    var pendingAttachment by remember { mutableStateOf<AttachmentInfo?>(null) }
     var selectedMessage by remember { mutableStateOf<ChatMessage?>(null) }
+    var aiPopupMessage by remember { mutableStateOf<ChatMessage?>(null) }
     var showCallDialog by remember { mutableStateOf(false) }
+
+    val filePickerLauncher = rememberLauncherForActivityResult(
+        contract = ActivityResultContracts.OpenDocument()
+    ) { uri ->
+        if (uri != null) {
+            val info = onPickAttachment(uri)
+            if (info != null) {
+                pendingAttachment = info
+            } else {
+                Toast.makeText(context, "Не удалось прочитать файл", Toast.LENGTH_SHORT).show()
+            }
+        }
+    }
+
+    fun openAttachmentFile(att: AttachmentInfo) {
+        try {
+            val file = File(att.localPath)
+            if (!file.exists()) {
+                Toast.makeText(context, "Файл не найден на устройстве", Toast.LENGTH_SHORT).show()
+                return
+            }
+            val uri = FileProvider.getUriForFile(context, "${context.packageName}.fileprovider", file)
+            val intent = Intent(Intent.ACTION_VIEW).apply {
+                setDataAndType(uri, att.mimeType)
+                addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION)
+            }
+            context.startActivity(Intent.createChooser(intent, "Открыть файл"))
+        } catch (_: Exception) {
+            Toast.makeText(context, "Нет приложения для открытия этого файла", Toast.LENGTH_SHORT).show()
+        }
+    }
 
     val reversedMessages = remember(messages) { messages.asReversed() }
 
@@ -127,9 +186,13 @@ fun ChatScreen(
             isAiGenerating -> "печатает..."
             aiStatus == VoltAiStatus.READY -> "локальный ИИ • онлайн"
             aiStatus == VoltAiStatus.NOT_INSTALLED -> "нужен пакет com.voltage.ai"
-            else -> "сервер выключен"
+            else -> "сервер выключен • напиши «инструкция»"
         }
-        ChatType.LOCAL_LAN -> if (chat.isOnline) "Wi-Fi • ${chat.peerHost ?: "онлайн"}" else "не в сети"
+        ChatType.LOCAL_LAN -> if (chat.isOnline) {
+            "Сервер: ${chat.serverName ?: "Volt"} • ${chat.peerHost ?: "Wi-Fi"}"
+        } else {
+            "не в сети"
+        }
         ChatType.SAVED -> "облако на этом устройстве"
     }
 
@@ -198,7 +261,8 @@ fun ChatScreen(
                         } else {
                             MaterialTheme.colorScheme.onSurfaceVariant
                         },
-                        maxLines = 1
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis
                     )
                 }
 
@@ -219,6 +283,51 @@ fun ChatScreen(
                     .background(MaterialTheme.colorScheme.surface)
                     .navigationBarsPadding()
             ) {
+                // Превью прикреплённого файла перед отправкой
+                AnimatedVisibility(
+                    visible = pendingAttachment != null,
+                    enter = expandVertically(spring(dampingRatio = Spring.DampingRatioNoBouncy)) + fadeIn(tween(140)),
+                    exit = shrinkVertically(spring(dampingRatio = Spring.DampingRatioNoBouncy)) + fadeOut(tween(120))
+                ) {
+                    pendingAttachment?.let { att ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .background(MaterialTheme.colorScheme.surfaceContainerLow)
+                                .padding(horizontal = 14.dp, vertical = 8.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            Icon(
+                                imageVector = attachmentIconFor(att.mimeType),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(22.dp)
+                            )
+                            Spacer(modifier = Modifier.width(10.dp))
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text(
+                                    text = att.name,
+                                    style = MaterialTheme.typography.labelLarge,
+                                    maxLines = 1,
+                                    overflow = TextOverflow.Ellipsis
+                                )
+                                Text(
+                                    text = "Файл готов к отправке • ${att.formattedSize()}",
+                                    style = MaterialTheme.typography.bodySmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            IconButton(
+                                onClick = { pendingAttachment = null },
+                                modifier = Modifier.size(28.dp)
+                            ) {
+                                Icon(Icons.Rounded.Close, contentDescription = "Убрать", modifier = Modifier.size(18.dp))
+                            }
+                        }
+                    }
+                }
+
+                // Превью ответа на сообщение
                 AnimatedVisibility(
                     visible = replyingTo != null,
                     enter = expandVertically(spring(dampingRatio = Spring.DampingRatioNoBouncy)) + fadeIn(tween(140)),
@@ -281,11 +390,17 @@ fun ChatScreen(
                                 .padding(start = 6.dp, end = 14.dp, top = 4.dp, bottom = 4.dp),
                             verticalAlignment = Alignment.CenterVertically
                         ) {
-                            IconButton(onClick = { /* Вложения добавим на следующем этапе */ }) {
+                            IconButton(
+                                onClick = { filePickerLauncher.launch(arrayOf("*/*")) }
+                            ) {
                                 Icon(
                                     imageVector = Icons.Rounded.AttachFile,
-                                    contentDescription = "Вложение",
-                                    tint = MaterialTheme.colorScheme.onSurfaceVariant
+                                    contentDescription = "Прикрепить файл",
+                                    tint = if (pendingAttachment != null) {
+                                        MaterialTheme.colorScheme.primary
+                                    } else {
+                                        MaterialTheme.colorScheme.onSurfaceVariant
+                                    }
                                 )
                             }
 
@@ -296,7 +411,7 @@ fun ChatScreen(
                             ) {
                                 if (inputText.isEmpty()) {
                                     Text(
-                                        text = "Сообщение",
+                                        text = if (pendingAttachment != null) "Подпись к файлу..." else "Сообщение",
                                         style = MaterialTheme.typography.bodyLarge,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -317,9 +432,10 @@ fun ChatScreen(
 
                     Spacer(modifier = Modifier.width(8.dp))
 
+                    val canSend = inputText.isNotBlank() || pendingAttachment != null
                     val buttonState = when {
                         chat.type == ChatType.AI && isAiGenerating -> 2
-                        inputText.isNotBlank() -> 1
+                        canSend -> 1
                         else -> 0
                     }
 
@@ -328,9 +444,10 @@ fun ChatScreen(
                             when (buttonState) {
                                 2 -> onStopAi()
                                 1 -> {
-                                    onSendMessage(inputText.trim(), replyingTo)
+                                    onSendMessage(inputText.trim(), replyingTo, pendingAttachment)
                                     inputText = ""
                                     replyingTo = null
+                                    pendingAttachment = null
                                 }
                                 else -> {}
                             }
@@ -340,8 +457,8 @@ fun ChatScreen(
                         AnimatedContent(
                             targetState = buttonState,
                             transitionSpec = {
-                                (scaleIn(initialScale = 0.78f, animationSpec = tween(150)) + fadeIn(tween(150))) togetherWith
-                                    (scaleOut(targetScale = 0.78f, animationSpec = tween(110)) + fadeOut(tween(110)))
+                                (scaleIn(initialScale = 0.72f, animationSpec = spring(dampingRatio = 0.65f)) + fadeIn(tween(140))) togetherWith
+                                    (scaleOut(targetScale = 0.72f, animationSpec = tween(100)) + fadeOut(tween(100)))
                             },
                             label = "sendMorph"
                         ) { state ->
@@ -424,14 +541,15 @@ fun ChatScreen(
                         if (msg.isMediaDemo) {
                             WavyMediaMessageBubble(
                                 message = msg,
-                                onLongClick = { selectedMessage = msg }
+                                onTap = { selectedMessage = msg }
                             )
                         } else {
                             TelegramMessageBubble(
                                 message = msg,
                                 isFirstInGroup = isFirstInGroup,
                                 isLastInGroup = isLastInGroup,
-                                onLongClick = { selectedMessage = msg }
+                                onTap = { selectedMessage = msg },
+                                onOpenAttachment = { openAttachmentFile(it) }
                             )
                         }
                     }
@@ -462,6 +580,7 @@ fun ChatScreen(
         }
     }
 
+    // Меню действий по простому ТАПУ на сообщение
     selectedMessage?.let { msg ->
         ModalBottomSheet(
             onDismissRequest = { selectedMessage = null },
@@ -473,29 +592,43 @@ fun ChatScreen(
                     .navigationBarsPadding()
                     .padding(bottom = 16.dp)
             ) {
+                msg.attachment?.let { att ->
+                    ListItem(
+                        headlineContent = { Text("Открыть файл") },
+                        supportingContent = { Text("${att.name} • ${att.formattedSize()}") },
+                        leadingContent = { Icon(Icons.Rounded.OpenInNew, null, tint = MaterialTheme.colorScheme.primary) },
+                        modifier = Modifier.clickable {
+                            selectedMessage = null
+                            openAttachmentFile(att)
+                        }
+                    )
+                }
                 ListItem(
                     headlineContent = { Text("Ответить") },
                     leadingContent = { Icon(Icons.AutoMirrored.Rounded.Reply, null) },
                     modifier = Modifier.clickable {
-                        replyingTo = ReplyPreview(msg.senderName, msg.text)
+                        val preview = msg.text.ifBlank { msg.attachment?.name ?: "Вложение" }
+                        replyingTo = ReplyPreview(msg.senderName, preview)
                         selectedMessage = null
                     }
                 )
-                ListItem(
-                    headlineContent = { Text("Копировать текст") },
-                    leadingContent = { Icon(Icons.Rounded.ContentCopy, null) },
-                    modifier = Modifier.clickable {
-                        clipboard.setText(AnnotatedString(msg.text))
-                        selectedMessage = null
-                    }
-                )
-                if (chat.type != ChatType.AI) {
+                if (chat.type != ChatType.AI && msg.text.isNotBlank()) {
                     ListItem(
                         headlineContent = { Text("Спросить у Volt AI") },
-                        supportingContent = { Text("Переслать локальной нейросети") },
+                        supportingContent = { Text("Открыть мини-окно с ответом прямо здесь") },
                         leadingContent = { Icon(Icons.Rounded.AutoAwesome, null, tint = MaterialTheme.colorScheme.primary) },
                         modifier = Modifier.clickable {
-                            onAskAiAboutMessage(msg)
+                            selectedMessage = null
+                            aiPopupMessage = msg
+                        }
+                    )
+                }
+                if (msg.text.isNotBlank()) {
+                    ListItem(
+                        headlineContent = { Text("Копировать текст") },
+                        leadingContent = { Icon(Icons.Rounded.ContentCopy, null) },
+                        modifier = Modifier.clickable {
+                            clipboard.setText(AnnotatedString(msg.text))
                             selectedMessage = null
                         }
                     )
@@ -512,12 +645,29 @@ fun ChatScreen(
         }
     }
 
+    // Встроенное мини-окно Volt AI прямо поверх текущего чата
+    aiPopupMessage?.let { targetMsg ->
+        InChatAiMiniWindow(
+            sourceMessage = targetMsg,
+            onDismiss = { aiPopupMessage = null },
+            onOpenVoltAi = onOpenVoltAi,
+            onInsertIntoChat = { aiAnswer ->
+                onSendMessage(
+                    aiAnswer,
+                    ReplyPreview(targetMsg.senderName, targetMsg.text),
+                    null
+                )
+                aiPopupMessage = null
+            }
+        )
+    }
+
     if (showCallDialog) {
         AlertDialog(
             onDismissRequest = { showCallDialog = false },
             icon = { Icon(Icons.Rounded.Videocam, null) },
             title = { Text("Видеозвонки 30/60 fps") },
-            text = { Text("Модуль WebRTC + захват экрана подключим следующим этапом прямо поверх этого локального соединения с ${chat.title}.") },
+            text = { Text("Модуль WebRTC + захват экрана подключим следующим этапом прямо поверх локального соединения с ${chat.title}.") },
             confirmButton = {
                 TextButton(onClick = { showCallDialog = false }) {
                     Text("Ок")
@@ -527,13 +677,287 @@ fun ChatScreen(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
+@OptIn(ExperimentalMaterial3Api::class)
+@Composable
+private fun InChatAiMiniWindow(
+    sourceMessage: ChatMessage,
+    onDismiss: () -> Unit,
+    onOpenVoltAi: () -> Unit,
+    onInsertIntoChat: (String) -> Unit
+) {
+    val scope = rememberCoroutineScope()
+    val clipboard = LocalClipboardManager.current
+    val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
+
+    var aiReply by remember(sourceMessage.id) { mutableStateOf("") }
+    var isStreaming by remember(sourceMessage.id) { mutableStateOf(true) }
+    var hasError by remember(sourceMessage.id) { mutableStateOf(false) }
+    var customQuestion by remember(sourceMessage.id) { mutableStateOf("") }
+    var activeJob by remember { mutableStateOf<Job?>(null) }
+
+    fun runGeneration(extraPrompt: String?) {
+        activeJob?.cancel()
+        aiReply = ""
+        isStreaming = true
+        hasError = false
+
+        val prompt = if (extraPrompt.isNullOrBlank()) {
+            "Кратко и по делу ответь или объясни это сообщение из чата:\n«${sourceMessage.text}»"
+        } else {
+            "Контекст сообщения из чата: «${sourceMessage.text}»\n\nЗапрос пользователя: $extraPrompt"
+        }
+
+        activeJob = scope.launch {
+            val buffer = StringBuilder()
+            var lastUpdate = 0L
+            VoltAiClient.streamCompletion(listOf(AiChatMessage("user", prompt)))
+                .catch {
+                    hasError = true
+                    aiReply = "Локальный сервер Volt AI (127.0.0.1:8080) сейчас выключен. Открой Volt AI и включи сервер."
+                }
+                .collect { chunk ->
+                    buffer.append(chunk)
+                    val now = System.currentTimeMillis()
+                    if (now - lastUpdate >= 35L) {
+                        aiReply = buffer.toString()
+                        lastUpdate = now
+                    }
+                }
+            if (buffer.isNotEmpty()) {
+                aiReply = buffer.toString()
+            }
+            isStreaming = false
+        }
+    }
+
+    LaunchedEffect(sourceMessage.id) {
+        runGeneration(null)
+    }
+
+    DisposableEffect(Unit) {
+        onDispose { activeJob?.cancel() }
+    }
+
+    ModalBottomSheet(
+        onDismissRequest = onDismiss,
+        sheetState = sheetState,
+        containerColor = MaterialTheme.colorScheme.surfaceContainer
+    ) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(horizontal = 18.dp, vertical = 6.dp)
+        ) {
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                Box(
+                    modifier = Modifier
+                        .size(34.dp)
+                        .clip(CircleShape)
+                        .background(MaterialTheme.colorScheme.primaryContainer),
+                    contentAlignment = Alignment.Center
+                ) {
+                    Icon(
+                        imageVector = Icons.Rounded.AutoAwesome,
+                        contentDescription = null,
+                        tint = MaterialTheme.colorScheme.onPrimaryContainer,
+                        modifier = Modifier.size(18.dp)
+                    )
+                }
+                Spacer(modifier = Modifier.width(10.dp))
+                Column(modifier = Modifier.weight(1f)) {
+                    Text(
+                        text = "Volt AI • Быстрый ответ",
+                        style = MaterialTheme.typography.titleMedium,
+                        fontWeight = FontWeight.SemiBold
+                    )
+                    Text(
+                        text = if (isStreaming) "Генерирует ответ локально..." else "Готово",
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary
+                    )
+                }
+                if (isStreaming) {
+                    IconButton(onClick = {
+                        activeJob?.cancel()
+                        isStreaming = false
+                    }) {
+                        Icon(Icons.Rounded.Stop, contentDescription = "Остановить")
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Цитата исходного сообщения
+            AppSurface(
+                modifier = Modifier.fillMaxWidth(),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surface
+            ) {
+                Row(modifier = Modifier.padding(12.dp)) {
+                    Box(
+                        modifier = Modifier
+                            .width(3.dp)
+                            .height(34.dp)
+                            .clip(RoundedCornerShape(2.dp))
+                            .background(MaterialTheme.colorScheme.primary)
+                    )
+                    Spacer(modifier = Modifier.width(10.dp))
+                    Column {
+                        Text(
+                            text = sourceMessage.senderName,
+                            style = MaterialTheme.typography.labelMedium,
+                            color = MaterialTheme.colorScheme.primary,
+                            fontWeight = FontWeight.SemiBold
+                        )
+                        Text(
+                            text = sourceMessage.text,
+                            style = MaterialTheme.typography.bodySmall,
+                            maxLines = 2,
+                            overflow = TextOverflow.Ellipsis
+                        )
+                    }
+                }
+            }
+
+            if (isStreaming) {
+                Spacer(modifier = Modifier.height(8.dp))
+                LinearProgressIndicator(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .clip(RoundedCornerShape(4.dp))
+                )
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Область с генерируемым ответом ИИ
+            AppSurface(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 90.dp, max = 260.dp),
+                shape = RoundedCornerShape(18.dp),
+                color = MaterialTheme.colorScheme.surfaceContainerHigh
+            ) {
+                Column(
+                    modifier = Modifier
+                        .fillMaxWidth()
+                        .verticalScroll(rememberScrollState())
+                        .padding(14.dp)
+                ) {
+                    Text(
+                        text = aiReply.ifEmpty { "Думает..." },
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
+
+            Spacer(modifier = Modifier.height(10.dp))
+
+            // Поле уточнения вопроса к этому же сообщению
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                AppSurface(
+                    modifier = Modifier.weight(1f),
+                    shape = RoundedCornerShape(22.dp),
+                    color = MaterialTheme.colorScheme.surface
+                ) {
+                    Box(modifier = Modifier.padding(horizontal = 14.dp, vertical = 11.dp)) {
+                        if (customQuestion.isEmpty()) {
+                            Text(
+                                text = "Уточнить у ИИ по этому сообщению...",
+                                style = MaterialTheme.typography.bodySmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        BasicTextField(
+                            value = customQuestion,
+                            onValueChange = { customQuestion = it },
+                            singleLine = true,
+                            textStyle = MaterialTheme.typography.bodyMedium.copy(
+                                color = MaterialTheme.colorScheme.onSurface
+                            ),
+                            cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                            modifier = Modifier.fillMaxWidth()
+                        )
+                    }
+                }
+                Spacer(modifier = Modifier.width(8.dp))
+                FilledTonalIconButton(
+                    onClick = {
+                        if (customQuestion.isNotBlank()) {
+                            val q = customQuestion.trim()
+                            customQuestion = ""
+                            runGeneration(q)
+                        }
+                    },
+                    modifier = Modifier.size(44.dp)
+                ) {
+                    Icon(Icons.AutoMirrored.Rounded.Send, contentDescription = "Спросить")
+                }
+            }
+
+            Spacer(modifier = Modifier.height(12.dp))
+
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
+                if (hasError) {
+                    FilledTonalButton(
+                        onClick = onOpenVoltAi,
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Открыть Volt AI")
+                    }
+                } else {
+                    OutlinedButton(
+                        onClick = {
+                            if (aiReply.isNotBlank()) {
+                                clipboard.setText(AnnotatedString(aiReply))
+                            }
+                        },
+                        enabled = aiReply.isNotBlank(),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Копировать")
+                    }
+                    FilledTonalButton(
+                        onClick = { onInsertIntoChat(aiReply) },
+                        enabled = !isStreaming && aiReply.isNotBlank(),
+                        modifier = Modifier.weight(1f)
+                    ) {
+                        Text("Отправить в чат")
+                    }
+                }
+            }
+
+            Spacer(modifier = Modifier.height(14.dp))
+        }
+    }
+}
+
+private fun attachmentIconFor(mimeType: String) = when {
+    mimeType.startsWith("image/") -> Icons.Rounded.Image
+    mimeType.startsWith("video/") -> Icons.Rounded.VideoFile
+    mimeType.startsWith("audio/") -> Icons.Rounded.AudioFile
+    else -> Icons.Rounded.InsertDriveFile
+}
+
 @Composable
 private fun TelegramMessageBubble(
     message: ChatMessage,
     isFirstInGroup: Boolean,
     isLastInGroup: Boolean,
-    onLongClick: () -> Unit
+    onTap: () -> Unit,
+    onOpenAttachment: (AttachmentInfo) -> Unit
 ) {
     val isMe = message.isFromMe
     val shape = if (isMe) {
@@ -560,10 +984,7 @@ private fun TelegramMessageBubble(
             modifier = Modifier
                 .widthIn(min = 76.dp, max = 315.dp)
                 .clip(shape)
-                .combinedClickable(
-                    onClick = {},
-                    onLongClick = onLongClick
-                ),
+                .bounceClick(pressedScale = 0.97f, onClick = onTap),
             shape = shape,
             color = if (isMe) {
                 MaterialTheme.colorScheme.primaryContainer
@@ -610,10 +1031,53 @@ private fun TelegramMessageBubble(
                     }
                 }
 
-                Text(
-                    text = message.text,
-                    style = MaterialTheme.typography.bodyLarge
-                )
+                message.attachment?.let { att ->
+                    Row(
+                        modifier = Modifier
+                            .padding(bottom = if (message.text.isNotBlank()) 6.dp else 2.dp)
+                            .clip(RoundedCornerShape(14.dp))
+                            .background(MaterialTheme.colorScheme.surface.copy(alpha = 0.45f))
+                            .clickable { onOpenAttachment(att) }
+                            .padding(horizontal = 10.dp, vertical = 8.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Box(
+                            modifier = Modifier
+                                .size(38.dp)
+                                .clip(CircleShape)
+                                .background(MaterialTheme.colorScheme.primary.copy(alpha = 0.16f)),
+                            contentAlignment = Alignment.Center
+                        ) {
+                            Icon(
+                                imageVector = attachmentIconFor(att.mimeType),
+                                contentDescription = null,
+                                tint = MaterialTheme.colorScheme.primary,
+                                modifier = Modifier.size(20.dp)
+                            )
+                        }
+                        Spacer(modifier = Modifier.width(10.dp))
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text(
+                                text = att.name,
+                                style = MaterialTheme.typography.labelLarge,
+                                maxLines = 1,
+                                overflow = TextOverflow.Ellipsis
+                            )
+                            Text(
+                                text = att.formattedSize(),
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                    }
+                }
+
+                if (message.text.isNotBlank()) {
+                    Text(
+                        text = message.text,
+                        style = MaterialTheme.typography.bodyLarge
+                    )
+                }
 
                 Spacer(modifier = Modifier.height(2.dp))
 
@@ -622,7 +1086,7 @@ private fun TelegramMessageBubble(
                     verticalAlignment = Alignment.CenterVertically
                 ) {
                     Text(
-                        text = message.formattedTime(),
+                        text = message.timeLabel,
                         style = MaterialTheme.typography.labelSmall,
                         color = if (isMe) {
                             MaterialTheme.colorScheme.onPrimaryContainer.copy(alpha = 0.65f)
@@ -645,11 +1109,10 @@ private fun TelegramMessageBubble(
     }
 }
 
-@OptIn(ExperimentalFoundationApi::class)
 @Composable
 private fun WavyMediaMessageBubble(
     message: ChatMessage,
-    onLongClick: () -> Unit
+    onTap: () -> Unit
 ) {
     var isPlaying by remember { mutableStateOf(false) }
     var progress by remember { mutableFloatStateOf(0.32f) }
@@ -666,7 +1129,7 @@ private fun WavyMediaMessageBubble(
             modifier = Modifier
                 .widthIn(max = 315.dp)
                 .clip(RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 5.dp, bottomEnd = 20.dp))
-                .combinedClickable(onClick = {}, onLongClick = onLongClick),
+                .bounceClick(pressedScale = 0.98f, onClick = onTap),
             shape = RoundedCornerShape(topStart = 20.dp, topEnd = 20.dp, bottomStart = 5.dp, bottomEnd = 20.dp),
             color = MaterialTheme.colorScheme.surfaceContainer
         ) {
@@ -683,8 +1146,8 @@ private fun WavyMediaMessageBubble(
                     AnimatedContent(
                         targetState = isPlaying,
                         transitionSpec = {
-                            (scaleIn(initialScale = 0.78f, animationSpec = tween(150)) + fadeIn(tween(150))) togetherWith
-                                (scaleOut(targetScale = 0.78f, animationSpec = tween(110)) + fadeOut(tween(110)))
+                            (scaleIn(initialScale = 0.75f, animationSpec = tween(140)) + fadeIn(tween(140))) togetherWith
+                                (scaleOut(targetScale = 0.75f, animationSpec = tween(100)) + fadeOut(tween(100)))
                         },
                         label = "playPause"
                     ) { playing ->
@@ -713,7 +1176,7 @@ private fun WavyMediaMessageBubble(
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )
                         Text(
-                            text = message.formattedTime(),
+                            text = message.timeLabel,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant.copy(alpha = 0.75f)
                         )

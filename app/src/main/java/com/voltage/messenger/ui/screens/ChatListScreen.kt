@@ -1,10 +1,13 @@
 package com.voltage.messenger.ui.screens
 
 import androidx.compose.animation.AnimatedContent
-import androidx.compose.animation.AnimatedVisibility
+import androidx.compose.animation.core.Spring
+import androidx.compose.animation.core.spring
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
+import androidx.compose.animation.scaleIn
+import androidx.compose.animation.scaleOut
 import androidx.compose.animation.togetherWith
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
@@ -32,10 +35,12 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.Close
+import androidx.compose.material.icons.rounded.Dns
 import androidx.compose.material.icons.rounded.DoneAll
 import androidx.compose.material.icons.rounded.Edit
 import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Menu
+import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Wifi
@@ -46,6 +51,7 @@ import androidx.compose.material3.FloatingActionButton
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.ListItem
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
@@ -70,6 +76,8 @@ import com.voltage.messenger.model.ChatFolder
 import com.voltage.messenger.model.ChatMessage
 import com.voltage.messenger.model.ChatRoom
 import com.voltage.messenger.model.ChatType
+import com.voltage.messenger.model.LanPeer
+import com.voltage.messenger.ui.components.bounceClick
 import com.voltage.messenger.ui.theme.AppSurface
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -79,17 +87,21 @@ fun ChatListScreen(
     messagesByChat: Map<String, List<ChatMessage>>,
     aiStatus: VoltAiStatus,
     isLanActive: Boolean,
-    lanPeerCount: Int,
+    lanPort: Int,
+    lanPeers: List<LanPeer>,
     nickname: String,
+    serverName: String,
     fingerprintEmojis: String,
-    onNicknameChange: (String) -> Unit,
+    onIdentityChange: (newNick: String, newServerName: String) -> Unit,
     onChatClick: (ChatRoom) -> Unit,
+    onOpenAiClick: () -> Unit,
     onOpenSavedClick: () -> Unit
 ) {
     var selectedFolder by remember { mutableStateOf(ChatFolder.ALL) }
     var isSearching by remember { mutableStateOf(false) }
     var searchQuery by remember { mutableStateOf("") }
     var showProfileSheet by remember { mutableStateOf(false) }
+    var showNewChatSheet by remember { mutableStateOf(false) }
 
     val filteredChats = remember(chats, selectedFolder, searchQuery, messagesByChat) {
         chats.filter { chat ->
@@ -100,6 +112,7 @@ fun ChatListScreen(
             }
             val queryOk = searchQuery.isBlank() ||
                 chat.title.contains(searchQuery, ignoreCase = true) ||
+                (chat.serverName?.contains(searchQuery, ignoreCase = true) == true) ||
                 (messagesByChat[chat.id]?.lastOrNull()?.text?.contains(searchQuery, ignoreCase = true) == true)
             folderOk && queryOk
         }
@@ -114,7 +127,6 @@ fun ChatListScreen(
                     .fillMaxWidth()
                     .statusBarsPadding()
             ) {
-                // Верхняя панель в стиле Material You / Telegram
                 Row(
                     modifier = Modifier
                         .fillMaxWidth()
@@ -127,7 +139,10 @@ fun ChatListScreen(
 
                     AnimatedContent(
                         targetState = isSearching,
-                        transitionSpec = { fadeIn(tween(180)) togetherWith fadeOut(tween(120)) },
+                        transitionSpec = {
+                            (fadeIn(tween(180)) + scaleIn(initialScale = 0.96f, animationSpec = tween(180))) togetherWith
+                                (fadeOut(tween(120)) + scaleOut(targetScale = 0.96f, animationSpec = tween(120)))
+                        },
                         modifier = Modifier.weight(1f),
                         label = "searchBar"
                     ) { searching ->
@@ -141,7 +156,7 @@ fun ChatListScreen(
                             ) {
                                 if (searchQuery.isEmpty()) {
                                     Text(
-                                        text = "Поиск чатов и сообщений...",
+                                        text = "Поиск чатов и серверов...",
                                         style = MaterialTheme.typography.bodyLarge,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant
                                     )
@@ -174,12 +189,14 @@ fun ChatListScreen(
                                     Spacer(modifier = Modifier.width(5.dp))
                                     Text(
                                         text = if (isLanActive) {
-                                            "Локальная сеть • рядом: $lanPeerCount"
+                                            "Сервер «$serverName» • рядом: ${lanPeers.size}"
                                         } else {
-                                            "Офлайн-узел запускается..."
+                                            "Запуск локального сервера..."
                                         },
                                         style = MaterialTheme.typography.labelSmall,
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        maxLines = 1,
+                                        overflow = TextOverflow.Ellipsis
                                     )
                                 }
                             }
@@ -203,7 +220,6 @@ fun ChatListScreen(
                     }
                 }
 
-                // Папки чатов как в Telegram
                 LazyRow(
                     modifier = Modifier.fillMaxWidth(),
                     contentPadding = PaddingValues(horizontal = 14.dp, vertical = 4.dp),
@@ -222,13 +238,13 @@ fun ChatListScreen(
         },
         floatingActionButton = {
             FloatingActionButton(
-                onClick = onOpenSavedClick,
+                onClick = { showNewChatSheet = true },
                 containerColor = MaterialTheme.colorScheme.primaryContainer,
                 contentColor = MaterialTheme.colorScheme.onPrimaryContainer,
                 shape = RoundedCornerShape(20.dp),
                 modifier = Modifier.navigationBarsPadding()
             ) {
-                Icon(Icons.Rounded.Edit, contentDescription = "Новая заметка")
+                Icon(Icons.Rounded.Edit, contentDescription = "Новый чат")
             }
         }
     ) { innerPadding ->
@@ -240,15 +256,25 @@ fun ChatListScreen(
         ) {
             items(filteredChats, key = { it.id }) { chat ->
                 val lastMsg = messagesByChat[chat.id]?.lastOrNull()
-                ChatListItemRow(
-                    chat = chat,
-                    lastMessage = lastMsg,
-                    aiStatus = aiStatus,
-                    onClick = { onChatClick(chat) }
-                )
+                Box(
+                    modifier = Modifier.animateItem(
+                        fadeInSpec = tween(180),
+                        placementSpec = spring(
+                            dampingRatio = Spring.DampingRatioNoBouncy,
+                            stiffness = Spring.StiffnessMedium
+                        )
+                    )
+                ) {
+                    ChatListItemRow(
+                        chat = chat,
+                        lastMessage = lastMsg,
+                        aiStatus = aiStatus,
+                        onClick = { onChatClick(chat) }
+                    )
+                }
             }
 
-            if (selectedFolder == ChatFolder.LOCAL && lanPeerCount == 0) {
+            if (selectedFolder == ChatFolder.LOCAL && lanPeers.isEmpty()) {
                 item {
                     AppSurface(
                         modifier = Modifier
@@ -279,9 +305,101 @@ fun ChatListScreen(
         }
     }
 
+    // Меню «Новый чат» по нажатию на карандаш
+    if (showNewChatSheet) {
+        ModalBottomSheet(
+            onDismissRequest = { showNewChatSheet = false },
+            containerColor = MaterialTheme.colorScheme.surfaceContainer
+        ) {
+            Column(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .navigationBarsPadding()
+                    .padding(bottom = 18.dp)
+            ) {
+                Text(
+                    text = "Новое сообщение",
+                    style = MaterialTheme.typography.titleLarge,
+                    fontWeight = FontWeight.Bold,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+                )
+
+                ListItem(
+                    headlineContent = { Text("Написать Volt AI") },
+                    supportingContent = { Text("Локальная нейросеть на устройстве") },
+                    leadingContent = {
+                        Icon(Icons.Rounded.AutoAwesome, null, tint = MaterialTheme.colorScheme.primary)
+                    },
+                    modifier = Modifier.clickable {
+                        showNewChatSheet = false
+                        onOpenAiClick()
+                    }
+                )
+
+                ListItem(
+                    headlineContent = { Text("Избранное") },
+                    supportingContent = { Text("Личные заметки и файлы") },
+                    leadingContent = {
+                        Icon(Icons.Rounded.Bookmark, null, tint = MaterialTheme.colorScheme.primary)
+                    },
+                    modifier = Modifier.clickable {
+                        showNewChatSheet = false
+                        onOpenSavedClick()
+                    }
+                )
+
+                ListItem(
+                    headlineContent = { Text("Настройки локального сервера") },
+                    supportingContent = { Text("Сервер: $serverName • Ник: $nickname") },
+                    leadingContent = {
+                        Icon(Icons.Rounded.Dns, null, tint = MaterialTheme.colorScheme.secondary)
+                    },
+                    modifier = Modifier.clickable {
+                        showNewChatSheet = false
+                        showProfileSheet = true
+                    }
+                )
+
+                HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp, horizontal = 16.dp))
+
+                Text(
+                    text = "Устройства в твоей Wi-Fi сети (${lanPeers.size})",
+                    style = MaterialTheme.typography.labelLarge,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+                )
+
+                if (lanPeers.isEmpty()) {
+                    Text(
+                        text = "Пока никого не найдено. Подключи второй телефон к той же сети Wi-Fi и открой Volt Messenger.",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
+                    )
+                } else {
+                    lanPeers.forEach { peer ->
+                        ListItem(
+                            headlineContent = { Text(peer.nickname, fontWeight = FontWeight.Medium) },
+                            supportingContent = { Text("Сервер: ${peer.serverName} • ${peer.host}") },
+                            leadingContent = {
+                                Icon(Icons.Rounded.Wifi, null, tint = Color(0xFF22C55E))
+                            },
+                            modifier = Modifier.clickable {
+                                showNewChatSheet = false
+                                chats.firstOrNull { it.id == "lan_${peer.id}" }?.let(onChatClick)
+                            }
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    // Меню профиля с разделением Ника и Названия локального сервера
     if (showProfileSheet) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         var draftNick by remember(nickname) { mutableStateOf(nickname) }
+        var draftServer by remember(serverName) { mutableStateOf(serverName) }
 
         ModalBottomSheet(
             onDismissRequest = { showProfileSheet = false },
@@ -295,13 +413,17 @@ fun ChatListScreen(
                     .padding(horizontal = 20.dp, vertical = 8.dp)
             ) {
                 Text(
-                    text = "Профиль узла Volt",
+                    text = "Профиль и локальный сервер",
                     style = MaterialTheme.typography.titleLarge,
                     fontWeight = FontWeight.Bold
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = "Твоё устройство работает как локальный сервер в Wi-Fi сети",
+                    text = if (isLanActive) {
+                        "Локальный узел активен на порту $lanPort"
+                    } else {
+                        "Локальный узел не активен"
+                    },
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
@@ -311,7 +433,20 @@ fun ChatListScreen(
                 OutlinedTextField(
                     value = draftNick,
                     onValueChange = { draftNick = it },
-                    label = { Text("Имя в локальной сети") },
+                    label = { Text("Твой ник (виден в чатах)") },
+                    leadingIcon = { Icon(Icons.Rounded.Person, null) },
+                    singleLine = true,
+                    shape = RoundedCornerShape(16.dp),
+                    modifier = Modifier.fillMaxWidth()
+                )
+
+                Spacer(modifier = Modifier.height(12.dp))
+
+                OutlinedTextField(
+                    value = draftServer,
+                    onValueChange = { draftServer = it },
+                    label = { Text("Название локального сервера") },
+                    leadingIcon = { Icon(Icons.Rounded.Dns, null) },
                     singleLine = true,
                     shape = RoundedCornerShape(16.dp),
                     modifier = Modifier.fillMaxWidth()
@@ -348,45 +483,19 @@ fun ChatListScreen(
                     }
                 }
 
-                Spacer(modifier = Modifier.height(12.dp))
-
-                AppSurface(
-                    modifier = Modifier.fillMaxWidth(),
-                    shape = RoundedCornerShape(18.dp),
-                    color = MaterialTheme.colorScheme.surface
-                ) {
-                    Row(
-                        modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
-                    ) {
-                        Column(modifier = Modifier.weight(1f)) {
-                            Text(
-                                text = "Стиль интерфейса",
-                                style = MaterialTheme.typography.labelMedium,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                            Text(
-                                text = "Material You (Жидкое стекло — в v0.4)",
-                                style = MaterialTheme.typography.bodyMedium
-                            )
-                        }
-                    }
-                }
-
                 Spacer(modifier = Modifier.height(18.dp))
 
                 Button(
                     onClick = {
-                        if (draftNick.isNotBlank()) {
-                            onNicknameChange(draftNick.trim())
-                        }
+                        val finalNick = draftNick.trim().ifEmpty { nickname }
+                        val finalServer = draftServer.trim().ifEmpty { serverName }
+                        onIdentityChange(finalNick, finalServer)
                         showProfileSheet = false
                     },
                     shape = RoundedCornerShape(16.dp),
                     modifier = Modifier.fillMaxWidth()
                 ) {
-                    Text("Сохранить")
+                    Text("Сохранить и обновить узел")
                 }
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -417,16 +526,23 @@ private fun ChatListItemRow(
 
     val previewText = when {
         lastMessage != null -> {
-            if (lastMessage.isFromMe) "Вы: ${lastMessage.text}" else lastMessage.text
+            val base = if (lastMessage.attachment != null && lastMessage.text.isBlank()) {
+                "📎 ${lastMessage.attachment.name}"
+            } else if (lastMessage.attachment != null) {
+                "📎 ${lastMessage.text}"
+            } else {
+                lastMessage.text
+            }
+            if (lastMessage.isFromMe) "Вы: $base" else base
         }
-        chat.type == ChatType.LOCAL_LAN -> "В одной Wi-Fi сети • ${chat.peerHost ?: ""}"
+        chat.type == ChatType.LOCAL_LAN -> "Сервер: ${chat.serverName ?: "Volt-Node"} • ${chat.peerHost ?: ""}"
         else -> chat.subtitle
     }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .clickable(onClick = onClick)
+            .bounceClick(pressedScale = 0.985f, onClick = onClick)
     ) {
         Row(
             modifier = Modifier
@@ -496,7 +612,7 @@ private fun ChatListItemRow(
                             )
                         }
                         Text(
-                            text = lastMessage.formattedTime(),
+                            text = lastMessage.timeLabel,
                             style = MaterialTheme.typography.labelSmall,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
                         )

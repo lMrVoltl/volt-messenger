@@ -6,6 +6,7 @@ import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.compose.animation.AnimatedContent
+import androidx.compose.animation.core.FastOutSlowInEasing
 import androidx.compose.animation.core.tween
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -30,6 +31,7 @@ import com.voltage.messenger.core.ai.VoltAiClient
 import com.voltage.messenger.core.ai.VoltAiStatus
 import com.voltage.messenger.core.network.LanMessenger
 import com.voltage.messenger.core.storage.ChatStorage
+import com.voltage.messenger.model.AttachmentInfo
 import com.voltage.messenger.model.ChatMessage
 import com.voltage.messenger.model.ChatRoom
 import com.voltage.messenger.model.ChatType
@@ -44,6 +46,21 @@ import java.util.UUID
 
 private const val CHAT_ID_SAVED = "saved_messages"
 private const val CHAT_ID_AI = "volt_ai_local"
+
+private val VOLT_AI_GUIDE_TEXT = """
+📘 Как пользоваться локальным ИИ (Volt AI)
+
+1. Настройка в приложении Volt AI:
+• Установи приложение Volt AI (com.voltage.ai) и скачай хотя бы 1 языковую модель.
+• Загрузи модель в память.
+• Открой Настройки → Подключение и включи локальный сервер (127.0.0.1:8080).
+
+2. Использование в Volt Messenger:
+• В этом чате — просто пиши любые вопросы, ответы печатаются локально прямо на телефоне без интернета.
+• В любом другом чате — просто нажми (короткий тап) на любое сообщение → «Спросить у Volt AI». Откроется компактное окно прямо поверх чата с готовым ответом, который можно сразу отправить собеседнику.
+
+💡 Чтобы снова открыть эту памятку, просто напиши здесь слово: инструкция
+""".trimIndent()
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -65,6 +82,7 @@ fun VoltMessengerApp() {
 
     val storage = remember { ChatStorage(context) }
     var nickname by remember { mutableStateOf(storage.getNickname()) }
+    var serverName by remember { mutableStateOf(storage.getServerName()) }
     val fingerprint = remember { storage.getKeyFingerprintEmojis() }
 
     var activeChatId by remember { mutableStateOf<String?>(null) }
@@ -84,7 +102,7 @@ fun VoltMessengerApp() {
                         ChatMessage(
                             chatId = CHAT_ID_SAVED,
                             senderName = "Избранное",
-                            text = "Личное пространство для заметок, идей и пересылки сообщений.",
+                            text = "Личное пространство для заметок и файлов. Нажми на любое сообщение коротким тапом, чтобы открыть меню или спросить у Volt AI.",
                             isFromMe = false
                         ),
                         ChatMessage(
@@ -104,7 +122,7 @@ fun VoltMessengerApp() {
                         ChatMessage(
                             chatId = CHAT_ID_AI,
                             senderName = "Volt AI",
-                            text = "Локальный ИИ готов. Можно писать сюда напрямую или пересылать сообщения из других чатов долгим нажатием.",
+                            text = VOLT_AI_GUIDE_TEXT,
                             isFromMe = false
                         )
                     )
@@ -138,6 +156,7 @@ fun VoltMessengerApp() {
             context = context,
             myDeviceId = storage.getDeviceId(),
             myNickname = nickname,
+            myServerName = serverName,
             onMessageReceived = { incoming ->
                 scope.launch {
                     val chatId = "lan_${incoming.peerId}"
@@ -158,6 +177,7 @@ fun VoltMessengerApp() {
 
     val lanPeers by lanMessenger.peers.collectAsState()
     val isLanActive by lanMessenger.isLanActive.collectAsState()
+    val lanPort by lanMessenger.localPort.collectAsState()
 
     DisposableEffect(Unit) {
         lanMessenger.start()
@@ -182,7 +202,7 @@ fun VoltMessengerApp() {
                 ChatRoom(
                     id = CHAT_ID_SAVED,
                     title = "Избранное",
-                    subtitle = "Заметки на устройстве",
+                    subtitle = "Заметки и файлы на устройстве",
                     type = ChatType.SAVED,
                     isPinned = true,
                     unreadCount = unreadCounts[CHAT_ID_SAVED] ?: 0,
@@ -206,22 +226,28 @@ fun VoltMessengerApp() {
                 add(
                     ChatRoom(
                         id = cid,
-                        title = peer.name,
-                        subtitle = "Wi-Fi • ${peer.host}",
+                        title = peer.nickname,
+                        subtitle = "Сервер: ${peer.serverName} • ${peer.host}",
                         type = ChatType.LOCAL_LAN,
                         isOnline = true,
                         unreadCount = unreadCounts[cid] ?: 0,
                         avatarColorIndex = (idx + 2) % 3,
                         peerHost = peer.host,
-                        peerPort = peer.port
+                        peerPort = peer.port,
+                        serverName = peer.serverName
                     )
                 )
             }
         }
     }
 
-    fun sendToAi(promptText: String, replyTo: ReplyPreview?) {
+    fun sendToAi(promptText: String, replyTo: ReplyPreview?, attachment: AttachmentInfo?) {
         if (isAiGenerating) return
+
+        val effectiveText = promptText.ifBlank {
+            attachment?.let { "Прикреплён файл: ${it.name}" }.orEmpty()
+        }
+
         appendMessage(
             CHAT_ID_AI,
             ChatMessage(
@@ -229,9 +255,25 @@ fun VoltMessengerApp() {
                 senderName = nickname,
                 text = promptText,
                 isFromMe = true,
-                replyTo = replyTo
+                replyTo = replyTo,
+                attachment = attachment
             )
         )
+
+        // Встроенная команда «инструкция» работает всегда, даже офлайн
+        val normalized = effectiveText.trim().lowercase().trimEnd('!', '.', '?')
+        if (normalized == "инструкция" || normalized == "/help" || normalized == "помощь") {
+            appendMessage(
+                CHAT_ID_AI,
+                ChatMessage(
+                    chatId = CHAT_ID_AI,
+                    senderName = "Volt AI",
+                    text = VOLT_AI_GUIDE_TEXT,
+                    isFromMe = false
+                )
+            )
+            return
+        }
 
         val replyId = UUID.randomUUID().toString()
         appendMessage(
@@ -247,7 +289,7 @@ fun VoltMessengerApp() {
         isAiGenerating = true
 
         val history = (messagesByChat[CHAT_ID_AI] ?: emptyList())
-            .filter { !it.isMediaDemo && it.id != replyId }
+            .filter { !it.isMediaDemo && it.id != replyId && it.text != VOLT_AI_GUIDE_TEXT && it.text.isNotBlank() }
             .takeLast(12)
             .map { AiChatMessage(if (it.isFromMe) "user" else "assistant", it.text) }
 
@@ -257,7 +299,7 @@ fun VoltMessengerApp() {
 
             VoltAiClient.streamCompletion(history)
                 .catch {
-                    buffer.append("Нет связи с сервером Volt AI (127.0.0.1:8080). Открой Volt AI и включи сервер.")
+                    buffer.append("Нет связи с сервером Volt AI (127.0.0.1:8080). Открой Volt AI и включи сервер, или напиши «инструкция».")
                     updateMessageText(CHAT_ID_AI, replyId, buffer.toString())
                     aiStatus = VoltAiStatus.SERVER_OFFLINE
                 }
@@ -287,12 +329,13 @@ fun VoltMessengerApp() {
     AnimatedContent(
         targetState = currentChat,
         transitionSpec = {
+            val spec = tween<androidx.compose.ui.unit.IntOffset>(240, easing = FastOutSlowInEasing)
             if (targetState != null) {
-                (slideInHorizontally(tween(240)) { it } + fadeIn(tween(180))) togetherWith
-                    (slideOutHorizontally(tween(240)) { -it / 4 } + fadeOut(tween(160)))
+                (slideInHorizontally(spec) { it } + fadeIn(tween(180))) togetherWith
+                    (slideOutHorizontally(spec) { -it / 4 } + fadeOut(tween(160)))
             } else {
-                (slideInHorizontally(tween(240)) { -it / 4 } + fadeIn(tween(180))) togetherWith
-                    (slideOutHorizontally(tween(240)) { it } + fadeOut(tween(160)))
+                (slideInHorizontally(spec) { -it / 4 } + fadeIn(tween(180))) togetherWith
+                    (slideOutHorizontally(spec) { it } + fadeOut(tween(160)))
             }
         },
         label = "screenNav"
@@ -303,17 +346,25 @@ fun VoltMessengerApp() {
                 messagesByChat = messagesByChat,
                 aiStatus = aiStatus,
                 isLanActive = isLanActive,
-                lanPeerCount = lanPeers.size,
+                lanPort = lanPort,
+                lanPeers = lanPeers,
                 nickname = nickname,
+                serverName = serverName,
                 fingerprintEmojis = fingerprint,
-                onNicknameChange = { newName ->
-                    nickname = newName
-                    storage.setNickname(newName)
-                    lanMessenger.restartWithNickname(newName)
+                onIdentityChange = { newNick, newServer ->
+                    nickname = newNick
+                    serverName = newServer
+                    storage.setNickname(newNick)
+                    storage.setServerName(newServer)
+                    lanMessenger.updateIdentity(newNick, newServer)
                 },
                 onChatClick = { clicked ->
                     unreadCounts[clicked.id] = 0
                     activeChatId = clicked.id
+                },
+                onOpenAiClick = {
+                    unreadCounts[CHAT_ID_AI] = 0
+                    activeChatId = CHAT_ID_AI
                 },
                 onOpenSavedClick = {
                     unreadCounts[CHAT_ID_SAVED] = 0
@@ -327,9 +378,10 @@ fun VoltMessengerApp() {
                 aiStatus = aiStatus,
                 isAiGenerating = isAiGenerating,
                 onBack = { activeChatId = null },
-                onSendMessage = { text, reply ->
+                onPickAttachment = { uri -> storage.copyUriToAttachment(uri) },
+                onSendMessage = { text, reply, attachment ->
                     when (chat.type) {
-                        ChatType.AI -> sendToAi(text, reply)
+                        ChatType.AI -> sendToAi(text, reply, attachment)
                         ChatType.SAVED -> {
                             appendMessage(
                                 chat.id,
@@ -338,7 +390,8 @@ fun VoltMessengerApp() {
                                     senderName = nickname,
                                     text = text,
                                     isFromMe = true,
-                                    replyTo = reply
+                                    replyTo = reply,
+                                    attachment = attachment
                                 )
                             )
                         }
@@ -350,12 +403,20 @@ fun VoltMessengerApp() {
                                     senderName = nickname,
                                     text = text,
                                     isFromMe = true,
-                                    replyTo = reply
+                                    replyTo = reply,
+                                    attachment = attachment
                                 )
                             )
                             val peer = lanPeers.firstOrNull { "lan_${it.id}" == chat.id }
                             if (peer != null) {
-                                scope.launch { lanMessenger.sendMessage(peer, text) }
+                                val wireText = if (attachment != null && text.isBlank()) {
+                                    "📎 ${attachment.name} (${attachment.formattedSize()})"
+                                } else if (attachment != null) {
+                                    "$text\n📎 ${attachment.name}"
+                                } else {
+                                    text
+                                }
+                                scope.launch { lanMessenger.sendMessage(peer, wireText) }
                             }
                         }
                     }
@@ -368,13 +429,6 @@ fun VoltMessengerApp() {
                     val current = messagesByChat[chat.id] ?: emptyList()
                     messagesByChat[chat.id] = current.filterNot { it.id == msg.id }
                     persistAll()
-                },
-                onAskAiAboutMessage = { msg ->
-                    activeChatId = CHAT_ID_AI
-                    sendToAi(
-                        promptText = "Объясни или ответь на сообщение:\n«${msg.text}»",
-                        replyTo = ReplyPreview(msg.senderName, msg.text)
-                    )
                 },
                 onOpenVoltAi = { VoltAiClient.launchVoltAi(context) }
             )

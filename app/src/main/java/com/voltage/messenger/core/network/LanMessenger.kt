@@ -26,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap
 data class IncomingLanMessage(
     val peerId: String,
     val senderName: String,
+    val serverName: String,
     val text: String,
     val timestamp: Long
 )
@@ -34,6 +35,7 @@ class LanMessenger(
     private val context: Context,
     private val myDeviceId: String,
     private var myNickname: String,
+    private var myServerName: String,
     private val onMessageReceived: (IncomingLanMessage) -> Unit
 ) {
     private val serviceType = "_voltmessenger._tcp."
@@ -51,6 +53,9 @@ class LanMessenger(
 
     private val _isLanActive = MutableStateFlow(false)
     val isLanActive: StateFlow<Boolean> = _isLanActive.asStateFlow()
+
+    private val _localPort = MutableStateFlow(0)
+    val localPort: StateFlow<Int> = _localPort.asStateFlow()
 
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
@@ -72,10 +77,11 @@ class LanMessenger(
             try {
                 val socket = ServerSocket(0)
                 serverSocket = socket
-                val localPort = socket.localPort
+                val port = socket.localPort
+                _localPort.value = port
                 _isLanActive.value = true
 
-                registerNsdService(localPort)
+                registerNsdService(port)
                 startDiscovery()
 
                 while (!socket.isClosed) {
@@ -92,8 +98,9 @@ class LanMessenger(
         }
     }
 
-    fun restartWithNickname(newName: String) {
-        myNickname = newName
+    fun updateIdentity(newNickname: String, newServerName: String) {
+        myNickname = newNickname
+        myServerName = newServerName
         stop()
         start()
     }
@@ -102,6 +109,7 @@ class LanMessenger(
         if (!isStarted) return
         isStarted = false
         _isLanActive.value = false
+        _localPort.value = 0
 
         try {
             discoveryListener?.let { nsdManager?.stopServiceDiscovery(it) }
@@ -134,8 +142,9 @@ class LanMessenger(
             Socket().use { socket ->
                 socket.connect(InetSocketAddress(peer.host, peer.port), 2500)
                 val payload = JSONObject()
-                    .put("peerId", myDeviceId)
+                    .put("peerId", myDeviceId.take(6))
                     .put("senderName", myNickname)
+                    .put("serverName", myServerName)
                     .put("text", text)
                     .put("timestamp", System.currentTimeMillis())
                 val writer = OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8)
@@ -157,24 +166,30 @@ class LanMessenger(
                 val json = JSONObject(line)
                 val peerId = json.optString("peerId")
                 val senderName = json.optString("senderName", "Сосед по Wi-Fi")
+                val serverName = json.optString("serverName", "Volt-Node")
                 val text = json.optString("text")
                 val ts = json.optLong("timestamp", System.currentTimeMillis())
                 if (peerId.isNotEmpty() && text.isNotEmpty()) {
-                    onMessageReceived(IncomingLanMessage(peerId, senderName, text, ts))
+                    onMessageReceived(IncomingLanMessage(peerId, senderName, serverName, text, ts))
                 }
             }
         } catch (_: Exception) {
         }
     }
 
-    private fun sanitizeName(raw: String): String {
-        return raw.replace(Regex("[^a-zA-Z0-9а-яА-ЯёЁ _-]"), "").trim().take(16).ifEmpty { "Volt" }
+    private fun sanitizePart(raw: String, fallback: String): String {
+        return raw.replace("--", "-")
+            .replace(Regex("[^a-zA-Z0-9а-яА-ЯёЁ _-]"), "")
+            .trim()
+            .take(14)
+            .ifEmpty { fallback }
     }
 
     private fun registerNsdService(port: Int) {
-        val cleanNick = sanitizeName(myNickname)
+        val cleanServer = sanitizePart(myServerName, "VoltNode")
+        val cleanNick = sanitizePart(myNickname, "User")
         val info = NsdServiceInfo().apply {
-            serviceName = "VM_${myDeviceId.take(6)}_$cleanNick"
+            serviceName = "VM_${myDeviceId.take(6)}_${cleanServer}--${cleanNick}"
             serviceType = this@LanMessenger.serviceType
             setPort(port)
         }
@@ -205,7 +220,7 @@ class LanMessenger(
             }
 
             override fun onServiceLost(service: NsdServiceInfo) {
-                val id = parsePeerId(service.serviceName) ?: return
+                val id = parsePeerMeta(service.serviceName)?.first ?: return
                 peersMap.remove(id)
                 _peers.value = peersMap.values.toList()
             }
@@ -229,12 +244,15 @@ class LanMessenger(
                 override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
                     val host = serviceInfo.host?.hostAddress ?: return
                     val port = serviceInfo.port
-                    val peerId = parsePeerId(serviceInfo.serviceName) ?: serviceInfo.serviceName
-                    val peerName = parsePeerName(serviceInfo.serviceName)
+                    val meta = parsePeerMeta(serviceInfo.serviceName)
+                    val peerId = meta?.first ?: serviceInfo.serviceName
+                    val serverName = meta?.second ?: "Volt-Node"
+                    val nick = meta?.third ?: serviceInfo.serviceName
                     if (peerId == myDeviceId.take(6)) return
                     peersMap[peerId] = LanPeer(
                         id = peerId,
-                        name = peerName,
+                        nickname = nick,
+                        serverName = serverName,
                         host = host,
                         port = port
                     )
@@ -245,13 +263,14 @@ class LanMessenger(
         }
     }
 
-    private fun parsePeerId(serviceName: String): String? {
+    // Возвращает Triple(peerId, serverName, nickname)
+    private fun parsePeerMeta(serviceName: String): Triple<String, String, String>? {
         val parts = serviceName.split("_", limit = 3)
-        return if (parts.size >= 3 && parts[0] == "VM") parts[1] else null
-    }
-
-    private fun parsePeerName(serviceName: String): String {
-        val parts = serviceName.split("_", limit = 3)
-        return if (parts.size >= 3 && parts[0] == "VM") parts[2] else serviceName
+        if (parts.size < 3 || parts[0] != "VM") return null
+        val id = parts[1]
+        val tail = parts[2].split("--", limit = 2)
+        val server = tail.getOrNull(0)?.ifBlank { "Volt-Node" } ?: "Volt-Node"
+        val nick = tail.getOrNull(1)?.ifBlank { server } ?: server
+        return Triple(id, server, nick)
     }
 }
