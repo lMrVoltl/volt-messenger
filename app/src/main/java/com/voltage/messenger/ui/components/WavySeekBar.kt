@@ -48,16 +48,16 @@ fun WavySeekBar(
     val amplitudeFactor by animateFloatAsState(
         targetValue = if (isPlaying) 1f else 0f,
         animationSpec = spring(
-            dampingRatio = 0.6f,
-            stiffness = Spring.StiffnessLow
+            dampingRatio = Spring.DampingRatioNoBouncy,
+            stiffness = Spring.StiffnessMediumLow
         ),
         label = "waveAmplitude"
     )
 
     val thumbScale by animateFloatAsState(
-        targetValue = if (isDragging) 1.35f else 1f,
+        targetValue = if (isDragging) 1.25f else 1f,
         animationSpec = spring(
-            dampingRatio = Spring.DampingRatioMediumBouncy,
+            dampingRatio = Spring.DampingRatioNoBouncy,
             stiffness = Spring.StiffnessMedium
         ),
         label = "thumbScale"
@@ -68,7 +68,7 @@ fun WavySeekBar(
         initialValue = 0f,
         targetValue = (2.0 * PI).toFloat(),
         animationSpec = infiniteRepeatable(
-            animation = tween(durationMillis = 1200, easing = LinearEasing),
+            animation = tween(durationMillis = 1350, easing = LinearEasing),
             repeatMode = RepeatMode.Restart
         ),
         label = "phaseShift"
@@ -102,9 +102,9 @@ fun WavySeekBar(
         val width = size.width
         val centerY = size.height / 2f
         val thumbX = width * clamped
-        val strokePx = 3.2.dp.toPx()
-        val maxAmpPx = 4.2.dp.toPx() * amplitudeFactor
-        val waveLengthPx = 24.dp.toPx()
+        val strokePx = 3.dp.toPx()
+        val maxAmpPx = 3.8.dp.toPx() * amplitudeFactor
+        val waveLengthPx = 26.dp.toPx()
 
         if (thumbX < width) {
             drawLine(
@@ -137,7 +137,7 @@ fun WavySeekBar(
         }
 
         val thumbW = 4.dp.toPx() * thumbScale
-        val thumbH = 15.dp.toPx() * thumbScale
+        val thumbH = 14.dp.toPx() * thumbScale
         drawRoundRect(
             color = activeColor,
             topLeft = Offset(thumbX - thumbW / 2f, centerY - thumbH / 2f),

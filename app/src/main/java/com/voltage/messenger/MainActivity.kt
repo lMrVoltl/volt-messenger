@@ -9,6 +9,7 @@ import androidx.compose.animation.AnimatedVisibility
 import androidx.compose.animation.animateColorAsState
 import androidx.compose.animation.core.Spring
 import androidx.compose.animation.core.spring
+import androidx.compose.animation.core.tween
 import androidx.compose.animation.expandVertically
 import androidx.compose.animation.fadeIn
 import androidx.compose.animation.fadeOut
@@ -133,19 +134,28 @@ fun VoltChatScreen() {
         )
     }
 
-    fun refreshStatus() {
+    fun refreshStatus(silent: Boolean = false) {
         scope.launch {
-            aiStatus = VoltAiStatus.CHECKING
+            if (!silent) aiStatus = VoltAiStatus.CHECKING
             aiStatus = VoltAiClient.checkStatus(context)
         }
     }
 
     DisposableEffect(lifecycleOwner) {
         val observer = LifecycleEventObserver { _, event ->
-            if (event == Lifecycle.Event.ON_RESUME) refreshStatus()
+            if (event == Lifecycle.Event.ON_RESUME) {
+                refreshStatus(silent = aiStatus != VoltAiStatus.CHECKING)
+            }
         }
         lifecycleOwner.lifecycle.addObserver(observer)
         onDispose { lifecycleOwner.lifecycle.removeObserver(observer) }
+    }
+
+    fun updateMessageText(id: String, text: String) {
+        val idx = messages.indexOfFirst { it.id == id }
+        if (idx >= 0) {
+            messages[idx] = messages[idx].copy(text = text)
+        }
     }
 
     fun sendMessage() {
@@ -156,7 +166,7 @@ fun VoltChatScreen() {
         messages.add(ChatUiMessage(text = prompt, isFromUser = true))
 
         val replyId = UUID.randomUUID().toString()
-        messages.add(ChatUiMessage(id = replyId, text = "...", isFromUser = false))
+        messages.add(ChatUiMessage(id = replyId, text = "Печатает...", isFromUser = false))
         isGenerating = true
 
         val history = messages
@@ -165,25 +175,28 @@ fun VoltChatScreen() {
             .map { AiChatMessage(if (it.isFromUser) "user" else "assistant", it.text) }
 
         activeJob = scope.launch {
-            listState.animateScrollToItem(messages.lastIndex)
+            listState.animateScrollToItem(0)
             val buffer = StringBuilder()
+            var lastUiUpdate = 0L
 
             VoltAiClient.streamCompletion(history)
                 .catch { e ->
                     buffer.append("Нет связи с Volt AI (${e.message ?: "сервер выключен"}). Запусти сервер в Настройках Volt AI.")
-                    val idx = messages.indexOfFirst { it.id == replyId }
-                    if (idx >= 0) messages[idx] = messages[idx].copy(text = buffer.toString())
+                    updateMessageText(replyId, buffer.toString())
                     aiStatus = VoltAiStatus.SERVER_OFFLINE
                 }
                 .collect { chunk ->
                     buffer.append(chunk)
-                    val idx = messages.indexOfFirst { it.id == replyId }
-                    if (idx >= 0) {
-                        messages[idx] = messages[idx].copy(text = buffer.toString())
+                    val now = System.currentTimeMillis()
+                    if (now - lastUiUpdate >= 35L) {
+                        updateMessageText(replyId, buffer.toString())
+                        lastUiUpdate = now
                     }
-                    listState.scrollToItem(messages.lastIndex)
                 }
 
+            if (buffer.isNotEmpty()) {
+                updateMessageText(replyId, buffer.toString())
+            }
             isGenerating = false
         }
     }
@@ -196,7 +209,7 @@ fun VoltChatScreen() {
         topBar = {
             ChatTopBar(
                 status = aiStatus,
-                onRefresh = { refreshStatus() },
+                onRefresh = { refreshStatus(silent = false) },
                 onOpenVoltAi = { VoltAiClient.launchVoltAi(context) }
             )
         },
@@ -220,8 +233,8 @@ fun VoltChatScreen() {
         ) {
             AnimatedVisibility(
                 visible = aiStatus == VoltAiStatus.NOT_INSTALLED || aiStatus == VoltAiStatus.SERVER_OFFLINE,
-                enter = expandVertically(spring(dampingRatio = 0.75f)) + fadeIn(),
-                exit = shrinkVertically(spring(dampingRatio = 0.8f)) + fadeOut()
+                enter = expandVertically(spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)) + fadeIn(tween(180)),
+                exit = shrinkVertically(spring(dampingRatio = Spring.DampingRatioNoBouncy, stiffness = Spring.StiffnessMediumLow)) + fadeOut(tween(150))
             ) {
                 StatusBanner(
                     status = aiStatus,
@@ -229,20 +242,25 @@ fun VoltChatScreen() {
                 )
             }
 
+            // reverseLayout = true: как в Telegram, растущий ответ ИИ плавно сдвигает ленту вверх без мерцания
             LazyColumn(
                 state = listState,
+                reverseLayout = true,
                 modifier = Modifier.fillMaxSize(),
                 contentPadding = PaddingValues(horizontal = 14.dp, vertical = 12.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                verticalArrangement = Arrangement.spacedBy(10.dp, Alignment.Bottom)
             ) {
-                items(messages, key = { it.id }) { msg ->
-                    Box(modifier = Modifier.animateItem(
-                        fadeInSpec = spring(stiffness = Spring.StiffnessMediumLow),
-                        placementSpec = spring(
-                            dampingRatio = Spring.DampingRatioLowBouncy,
-                            stiffness = Spring.StiffnessMediumLow
+                items(messages.asReversed(), key = { it.id }) { msg ->
+                    Box(
+                        modifier = Modifier.animateItem(
+                            fadeInSpec = tween(durationMillis = 180),
+                            fadeOutSpec = tween(durationMillis = 140),
+                            placementSpec = spring(
+                                dampingRatio = Spring.DampingRatioNoBouncy,
+                                stiffness = Spring.StiffnessMedium
+                            )
                         )
-                    )) {
+                    ) {
                         if (msg.isMediaDemo) {
                             WavyMediaBubble(title = msg.text)
                         } else {
@@ -268,6 +286,7 @@ private fun ChatTopBar(
             VoltAiStatus.NOT_INSTALLED -> Color(0xFFEF4444)
             VoltAiStatus.CHECKING -> MaterialTheme.colorScheme.outline
         },
+        animationSpec = tween(250),
         label = "statusDot"
     )
 
@@ -448,8 +467,8 @@ private fun WavyMediaBubble(title: String) {
                     AnimatedContent(
                         targetState = isPlaying,
                         transitionSpec = {
-                            (scaleIn(spring(dampingRatio = 0.6f)) + fadeIn()) togetherWith
-                                (scaleOut() + fadeOut())
+                            (scaleIn(initialScale = 0.78f, animationSpec = tween(160)) + fadeIn(tween(160))) togetherWith
+                                (scaleOut(targetScale = 0.78f, animationSpec = tween(120)) + fadeOut(tween(120)))
                         },
                         label = "playPause"
                     ) { playing ->
@@ -546,8 +565,8 @@ private fun ChatInputBar(
             AnimatedContent(
                 targetState = buttonState,
                 transitionSpec = {
-                    (scaleIn(spring(dampingRatio = 0.6f, stiffness = Spring.StiffnessMedium)) + fadeIn()) togetherWith
-                        (scaleOut() + fadeOut())
+                    (scaleIn(initialScale = 0.78f, animationSpec = tween(160)) + fadeIn(tween(160))) togetherWith
+                        (scaleOut(targetScale = 0.78f, animationSpec = tween(120)) + fadeOut(tween(120)))
                 },
                 label = "actionButton"
             ) { state ->
