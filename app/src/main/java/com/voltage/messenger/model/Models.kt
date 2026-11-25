@@ -29,12 +29,22 @@ data class AttachmentInfo(
     val name: String,
     val localPath: String,
     val mimeType: String,
-    val sizeBytes: Long
+    val sizeBytes: Long,
+    val uriString: String? = null,
+    val isVoice: Boolean = false,
+    val durationSec: Int = 0
 ) {
     fun formattedSize(): String = when {
         sizeBytes < 1024L -> "$sizeBytes Б"
         sizeBytes < 1024L * 1024L -> "${sizeBytes / 1024L} КБ"
-        else -> String.format(Locale.US, "%.1f МБ", sizeBytes / (1024.0 * 1024.0))
+        sizeBytes < 1024L * 1024L * 1024L -> String.format(Locale.US, "%.1f МБ", sizeBytes / (1024.0 * 1024.0))
+        else -> String.format(Locale.US, "%.2f ГБ", sizeBytes / (1024.0 * 1024.0 * 1024.0))
+    }
+
+    fun formattedDuration(): String {
+        val m = durationSec / 60
+        val s = durationSec % 60
+        return String.format(Locale.US, "%d:%02d", m, s)
     }
 }
 
@@ -50,7 +60,10 @@ data class ChatMessage(
     val isRead: Boolean = true,
     val isMediaDemo: Boolean = false,
     val replyTo: ReplyPreview? = null,
-    val attachment: AttachmentInfo? = null
+    val attachment: AttachmentInfo? = null,
+    val transferProgress: Float? = null, // null = завершено, 0f..1f = идёт передача
+    val transferSpeedMbps: Float? = null,
+    val isEncrypted: Boolean = false
 ) {
     companion object {
         private val timeFormat = ThreadLocal.withInitial {
@@ -84,5 +97,24 @@ data class LanPeer(
     val nickname: String,
     val serverName: String,
     val host: String,
-    val port: Int
+    val port: Int,
+    val lastSeenMs: Long = System.currentTimeMillis()
+)
+
+enum class CallStatus {
+    IDLE,
+    OUTGOING,
+    INCOMING,
+    CONNECTED
+}
+
+@Immutable
+data class LanCallState(
+    val status: CallStatus = CallStatus.IDLE,
+    val peerId: String = "",
+    val peerName: String = "",
+    val isMuted: Boolean = false,
+    val isSpeaker: Boolean = false,
+    val connectedAtMs: Long = 0L,
+    val sessionEmojis: String = ""
 )

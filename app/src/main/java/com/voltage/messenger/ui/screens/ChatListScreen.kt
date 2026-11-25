@@ -32,6 +32,7 @@ import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.rounded.AddLink
 import androidx.compose.material.icons.rounded.AutoAwesome
 import androidx.compose.material.icons.rounded.Bookmark
 import androidx.compose.material.icons.rounded.Close
@@ -44,6 +45,7 @@ import androidx.compose.material.icons.rounded.Person
 import androidx.compose.material.icons.rounded.PushPin
 import androidx.compose.material.icons.rounded.Search
 import androidx.compose.material.icons.rounded.Wifi
+import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.FilterChip
@@ -57,6 +59,7 @@ import androidx.compose.material3.ModalBottomSheet
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.material3.rememberModalBottomSheetState
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -77,7 +80,6 @@ import com.voltage.messenger.model.ChatMessage
 import com.voltage.messenger.model.ChatRoom
 import com.voltage.messenger.model.ChatType
 import com.voltage.messenger.model.LanPeer
-import com.voltage.messenger.ui.components.bounceClick
 import com.voltage.messenger.ui.theme.AppSurface
 
 @OptIn(ExperimentalMaterial3Api::class)
@@ -87,12 +89,14 @@ fun ChatListScreen(
     messagesByChat: Map<String, List<ChatMessage>>,
     aiStatus: VoltAiStatus,
     isLanActive: Boolean,
+    lanIp: String,
     lanPort: Int,
     lanPeers: List<LanPeer>,
     nickname: String,
     serverName: String,
     fingerprintEmojis: String,
     onIdentityChange: (newNick: String, newServerName: String) -> Unit,
+    onAddManualPeer: (ip: String, port: Int) -> Unit,
     onChatClick: (ChatRoom) -> Unit,
     onOpenAiClick: () -> Unit,
     onOpenSavedClick: () -> Unit
@@ -102,6 +106,7 @@ fun ChatListScreen(
     var searchQuery by remember { mutableStateOf("") }
     var showProfileSheet by remember { mutableStateOf(false) }
     var showNewChatSheet by remember { mutableStateOf(false) }
+    var showManualIpDialog by remember { mutableStateOf(false) }
 
     val filteredChats = remember(chats, selectedFolder, searchQuery, messagesByChat) {
         chats.filter { chat ->
@@ -140,7 +145,7 @@ fun ChatListScreen(
                     AnimatedContent(
                         targetState = isSearching,
                         transitionSpec = {
-                            (fadeIn(tween(180)) + scaleIn(initialScale = 0.96f, animationSpec = tween(180))) togetherWith
+                            (fadeIn(tween(180)) + scaleIn(initialScale = 0.96f, animationSpec = spring(stiffness = 500f))) togetherWith
                                 (fadeOut(tween(120)) + scaleOut(targetScale = 0.96f, animationSpec = tween(120)))
                         },
                         modifier = Modifier.weight(1f),
@@ -189,9 +194,9 @@ fun ChatListScreen(
                                     Spacer(modifier = Modifier.width(5.dp))
                                     Text(
                                         text = if (isLanActive) {
-                                            "Сервер «$serverName» • рядом: ${lanPeers.size}"
+                                            "«$serverName» • рядом: ${lanPeers.size}"
                                         } else {
-                                            "Запуск локального сервера..."
+                                            "Запуск узла..."
                                         },
                                         style = MaterialTheme.typography.labelSmall,
                                         color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -258,10 +263,10 @@ fun ChatListScreen(
                 val lastMsg = messagesByChat[chat.id]?.lastOrNull()
                 Box(
                     modifier = Modifier.animateItem(
-                        fadeInSpec = tween(180),
+                        fadeInSpec = tween(200),
                         placementSpec = spring(
-                            dampingRatio = Spring.DampingRatioNoBouncy,
-                            stiffness = Spring.StiffnessMedium
+                            dampingRatio = 0.88f,
+                            stiffness = 420f
                         )
                     )
                 ) {
@@ -273,39 +278,9 @@ fun ChatListScreen(
                     )
                 }
             }
-
-            if (selectedFolder == ChatFolder.LOCAL && lanPeers.isEmpty()) {
-                item {
-                    AppSurface(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .padding(horizontal = 16.dp, vertical = 12.dp),
-                        shape = RoundedCornerShape(22.dp),
-                        color = MaterialTheme.colorScheme.surfaceContainer
-                    ) {
-                        Row(
-                            modifier = Modifier.padding(16.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            Icon(
-                                imageVector = Icons.Rounded.Wifi,
-                                contentDescription = null,
-                                tint = MaterialTheme.colorScheme.primary
-                            )
-                            Spacer(modifier = Modifier.width(12.dp))
-                            Text(
-                                text = "Открой Volt Messenger на втором телефоне в этой же Wi-Fi сети — он сам появится здесь для общения без интернета.",
-                                style = MaterialTheme.typography.bodySmall,
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
-                            )
-                        }
-                    }
-                }
-            }
         }
     }
 
-    // Меню «Новый чат» по нажатию на карандаш
     if (showNewChatSheet) {
         ModalBottomSheet(
             onDismissRequest = { showNewChatSheet = false },
@@ -325,11 +300,19 @@ fun ChatListScreen(
                 )
 
                 ListItem(
+                    headlineContent = { Text("Подключиться по IP вручную") },
+                    supportingContent = { Text("Если точка доступа блокирует автопоиск") },
+                    leadingContent = { Icon(Icons.Rounded.AddLink, null, tint = MaterialTheme.colorScheme.primary) },
+                    modifier = Modifier.clickable {
+                        showNewChatSheet = false
+                        showManualIpDialog = true
+                    }
+                )
+
+                ListItem(
                     headlineContent = { Text("Написать Volt AI") },
                     supportingContent = { Text("Локальная нейросеть на устройстве") },
-                    leadingContent = {
-                        Icon(Icons.Rounded.AutoAwesome, null, tint = MaterialTheme.colorScheme.primary)
-                    },
+                    leadingContent = { Icon(Icons.Rounded.AutoAwesome, null, tint = MaterialTheme.colorScheme.primary) },
                     modifier = Modifier.clickable {
                         showNewChatSheet = false
                         onOpenAiClick()
@@ -339,39 +322,25 @@ fun ChatListScreen(
                 ListItem(
                     headlineContent = { Text("Избранное") },
                     supportingContent = { Text("Личные заметки и файлы") },
-                    leadingContent = {
-                        Icon(Icons.Rounded.Bookmark, null, tint = MaterialTheme.colorScheme.primary)
-                    },
+                    leadingContent = { Icon(Icons.Rounded.Bookmark, null, tint = MaterialTheme.colorScheme.primary) },
                     modifier = Modifier.clickable {
                         showNewChatSheet = false
                         onOpenSavedClick()
                     }
                 )
 
-                ListItem(
-                    headlineContent = { Text("Настройки локального сервера") },
-                    supportingContent = { Text("Сервер: $serverName • Ник: $nickname") },
-                    leadingContent = {
-                        Icon(Icons.Rounded.Dns, null, tint = MaterialTheme.colorScheme.secondary)
-                    },
-                    modifier = Modifier.clickable {
-                        showNewChatSheet = false
-                        showProfileSheet = true
-                    }
-                )
-
                 HorizontalDivider(modifier = Modifier.padding(vertical = 8.dp, horizontal = 16.dp))
 
                 Text(
-                    text = "Устройства в твоей Wi-Fi сети (${lanPeers.size})",
-                    style = MaterialTheme.typography.labelLarge,
+                    text = "Найдено рядом (${lanPeers.size}) • твой адрес: $lanIp:$lanPort",
+                    style = MaterialTheme.typography.labelMedium,
                     color = MaterialTheme.colorScheme.primary,
                     modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
                 )
 
                 if (lanPeers.isEmpty()) {
                     Text(
-                        text = "Пока никого не найдено. Подключи второй телефон к той же сети Wi-Fi и открой Volt Messenger.",
+                        text = "Включи Wi-Fi или точку доступа и открой Volt Messenger на втором телефоне — устройства найдут друг друга за 2–3 секунды.",
                         style = MaterialTheme.typography.bodySmall,
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(horizontal = 20.dp, vertical = 6.dp)
@@ -380,10 +349,8 @@ fun ChatListScreen(
                     lanPeers.forEach { peer ->
                         ListItem(
                             headlineContent = { Text(peer.nickname, fontWeight = FontWeight.Medium) },
-                            supportingContent = { Text("Сервер: ${peer.serverName} • ${peer.host}") },
-                            leadingContent = {
-                                Icon(Icons.Rounded.Wifi, null, tint = Color(0xFF22C55E))
-                            },
+                            supportingContent = { Text("Сервер: ${peer.serverName} • ${peer.host}:${peer.port}") },
+                            leadingContent = { Icon(Icons.Rounded.Wifi, null, tint = Color(0xFF22C55E)) },
                             modifier = Modifier.clickable {
                                 showNewChatSheet = false
                                 chats.firstOrNull { it.id == "lan_${peer.id}" }?.let(onChatClick)
@@ -395,7 +362,49 @@ fun ChatListScreen(
         }
     }
 
-    // Меню профиля с разделением Ника и Названия локального сервера
+    if (showManualIpDialog) {
+        var ipText by remember { mutableStateOf("192.168.43.1") }
+        var portText by remember { mutableStateOf("") }
+        AlertDialog(
+            onDismissRequest = { showManualIpDialog = false },
+            title = { Text("Подключиться по IP") },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(10.dp)) {
+                    Text(
+                        text = "Посмотри IP и порт в меню «Профиль и сервер» на втором телефоне.",
+                        style = MaterialTheme.typography.bodySmall
+                    )
+                    OutlinedTextField(
+                        value = ipText,
+                        onValueChange = { ipText = it },
+                        label = { Text("IP-адрес") },
+                        singleLine = true
+                    )
+                    OutlinedTextField(
+                        value = portText,
+                        onValueChange = { portText = it.filter { c -> c.isDigit() } },
+                        label = { Text("Порт (например 41234)") },
+                        singleLine = true
+                    )
+                }
+            },
+            confirmButton = {
+                Button(
+                    onClick = {
+                        val p = portText.toIntOrNull() ?: 0
+                        if (ipText.isNotBlank() && p in 1..65535) {
+                            onAddManualPeer(ipText.trim(), p)
+                            showManualIpDialog = false
+                        }
+                    }
+                ) { Text("Добавить") }
+            },
+            dismissButton = {
+                TextButton(onClick = { showManualIpDialog = false }) { Text("Отмена") }
+            }
+        )
+    }
+
     if (showProfileSheet) {
         val sheetState = rememberModalBottomSheetState(skipPartiallyExpanded = true)
         var draftNick by remember(nickname) { mutableStateOf(nickname) }
@@ -419,13 +428,9 @@ fun ChatListScreen(
                 )
                 Spacer(modifier = Modifier.height(4.dp))
                 Text(
-                    text = if (isLanActive) {
-                        "Локальный узел активен на порту $lanPort"
-                    } else {
-                        "Локальный узел не активен"
-                    },
+                    text = if (isLanActive) "Твой адрес: $lanIp:$lanPort (E2EE AES-256-GCM)" else "Сервер выключен",
                     style = MaterialTheme.typography.bodySmall,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                    color = MaterialTheme.colorScheme.primary
                 )
 
                 Spacer(modifier = Modifier.height(16.dp))
@@ -463,11 +468,7 @@ fun ChatListScreen(
                         modifier = Modifier.padding(14.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Icon(
-                            imageVector = Icons.Rounded.Lock,
-                            contentDescription = null,
-                            tint = MaterialTheme.colorScheme.primary
-                        )
+                        Icon(Icons.Rounded.Lock, null, tint = MaterialTheme.colorScheme.primary)
                         Spacer(modifier = Modifier.width(12.dp))
                         Column(modifier = Modifier.weight(1f)) {
                             Text(
@@ -487,9 +488,10 @@ fun ChatListScreen(
 
                 Button(
                     onClick = {
-                        val finalNick = draftNick.trim().ifEmpty { nickname }
-                        val finalServer = draftServer.trim().ifEmpty { serverName }
-                        onIdentityChange(finalNick, finalServer)
+                        onIdentityChange(
+                            draftNick.trim().ifEmpty { nickname },
+                            draftServer.trim().ifEmpty { serverName }
+                        )
                         showProfileSheet = false
                     },
                     shape = RoundedCornerShape(16.dp),
@@ -526,23 +528,22 @@ private fun ChatListItemRow(
 
     val previewText = when {
         lastMessage != null -> {
-            val base = if (lastMessage.attachment != null && lastMessage.text.isBlank()) {
-                "📎 ${lastMessage.attachment.name}"
-            } else if (lastMessage.attachment != null) {
-                "📎 ${lastMessage.text}"
-            } else {
-                lastMessage.text
+            val base = when {
+                lastMessage.attachment?.isVoice == true -> "🎤 Голосовое (${lastMessage.attachment.formattedDuration()})"
+                lastMessage.attachment != null && lastMessage.text.isBlank() -> "📎 ${lastMessage.attachment.name}"
+                lastMessage.attachment != null -> "📎 ${lastMessage.text}"
+                else -> lastMessage.text
             }
             if (lastMessage.isFromMe) "Вы: $base" else base
         }
-        chat.type == ChatType.LOCAL_LAN -> "Сервер: ${chat.serverName ?: "Volt-Node"} • ${chat.peerHost ?: ""}"
+        chat.type == ChatType.LOCAL_LAN -> "Сервер: ${chat.serverName ?: "Volt-Node"} • ${if (chat.isOnline) "рядом" else "офлайн"}"
         else -> chat.subtitle
     }
 
     Column(
         modifier = Modifier
             .fillMaxWidth()
-            .bounceClick(pressedScale = 0.985f, onClick = onClick)
+            .clickable(onClick = onClick)
     ) {
         Row(
             modifier = Modifier

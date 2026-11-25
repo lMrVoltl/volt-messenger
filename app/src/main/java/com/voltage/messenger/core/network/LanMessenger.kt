@@ -1,48 +1,84 @@
 package com.voltage.messenger.core.network
 
+import android.annotation.SuppressLint
 import android.content.Context
+import android.media.AudioAttributes
+import android.media.AudioFormat
+import android.media.AudioManager
+import android.media.AudioRecord
+import android.media.AudioTrack
+import android.media.MediaRecorder
+import android.net.Uri
 import android.net.nsd.NsdManager
 import android.net.nsd.NsdServiceInfo
 import android.net.wifi.WifiManager
+import com.voltage.messenger.core.crypto.EncryptedChannel
+import com.voltage.messenger.core.crypto.VoltCrypto
+import com.voltage.messenger.core.storage.ChatStorage
+import com.voltage.messenger.model.AttachmentInfo
+import com.voltage.messenger.model.CallStatus
+import com.voltage.messenger.model.LanCallState
 import com.voltage.messenger.model.LanPeer
+import kotlinx.coroutines.CompletableDeferred
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
+import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
-import java.io.BufferedReader
-import java.io.InputStreamReader
-import java.io.OutputStreamWriter
+import java.io.BufferedInputStream
+import java.io.BufferedOutputStream
+import java.io.DataInputStream
+import java.io.DataOutputStream
+import java.io.File
+import java.io.FileInputStream
+import java.io.FileOutputStream
+import java.net.DatagramPacket
+import java.net.DatagramSocket
+import java.net.Inet4Address
+import java.net.InetAddress
 import java.net.InetSocketAddress
+import java.net.NetworkInterface
 import java.net.ServerSocket
 import java.net.Socket
+import java.util.UUID
 import java.util.concurrent.ConcurrentHashMap
 
-data class IncomingLanMessage(
+data class IncomingLanEvent(
+    val messageId: String,
     val peerId: String,
     val senderName: String,
     val serverName: String,
     val text: String,
-    val timestamp: Long
+    val timestamp: Long,
+    val attachment: AttachmentInfo? = null,
+    val progress: Float? = null,
+    val speedMbps: Float? = null,
+    val isEncrypted: Boolean = true
 )
 
 class LanMessenger(
     private val context: Context,
+    private val storage: ChatStorage,
     private val myDeviceId: String,
     private var myNickname: String,
     private var myServerName: String,
-    private val onMessageReceived: (IncomingLanMessage) -> Unit
+    private val onEvent: (IncomingLanEvent) -> Unit
 ) {
+    private val shortId = myDeviceId.take(6)
     private val serviceType = "_voltmessenger._tcp."
+    private val udpPort = 45888
     private val nsdManager = context.getSystemService(Context.NSD_SERVICE) as? NsdManager
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
     private var serverSocket: ServerSocket? = null
+    private var udpSocket: DatagramSocket? = null
     private var multicastLock: WifiManager.MulticastLock? = null
     private var registeredName: String? = null
     private var isStarted = false
@@ -56,6 +92,15 @@ class LanMessenger(
 
     private val _localPort = MutableStateFlow(0)
     val localPort: StateFlow<Int> = _localPort.asStateFlow()
+
+    private val _localIp = MutableStateFlow("127.0.0.1")
+    val localIp: StateFlow<String> = _localIp.asStateFlow()
+
+    private val _callState = MutableStateFlow(LanCallState())
+    val callState: StateFlow<LanCallState> = _callState.asStateFlow()
+
+    private var activeCallSocket: Socket? = null
+    private var incomingCallDecision: CompletableDeferred<Boolean>? = null
 
     private var registrationListener: NsdManager.RegistrationListener? = null
     private var discoveryListener: NsdManager.DiscoveryListener? = null
@@ -79,10 +124,12 @@ class LanMessenger(
                 serverSocket = socket
                 val port = socket.localPort
                 _localPort.value = port
+                _localIp.value = detectLocalIpv4()
                 _isLanActive.value = true
 
                 registerNsdService(port)
-                startDiscovery()
+                startNsdDiscovery()
+                startUdpDiscovery(port)
 
                 while (!socket.isClosed) {
                     val client = try {
@@ -90,7 +137,7 @@ class LanMessenger(
                     } catch (_: Exception) {
                         break
                     }
-                    launch { handleClient(client) }
+                    launch { handleIncomingTcp(client) }
                 }
             } catch (_: Exception) {
                 _isLanActive.value = false
@@ -105,29 +152,39 @@ class LanMessenger(
         start()
     }
 
+    // Ручное добавление устройства по IP (на случай если точка доступа режет широковещательные пакеты)
+    fun addManualPeer(ip: String, port: Int, label: String = "Устройство $ip") {
+        val cleanIp = ip.trim()
+        if (cleanIp.isEmpty() || port !in 1..65535) return
+        val id = "ip_${cleanIp.replace(".", "_")}"
+        val peer = LanPeer(
+            id = id,
+            nickname = label,
+            serverName = cleanIp,
+            host = cleanIp,
+            port = port,
+            lastSeenMs = Long.MAX_VALUE // Ручной пир не пропадает по таймауту
+        )
+        peersMap[id] = peer
+        storage.saveKnownPeerName(id, peer.nickname, peer.serverName)
+        publishPeers()
+    }
+
     fun stop() {
         if (!isStarted) return
         isStarted = false
         _isLanActive.value = false
         _localPort.value = 0
+        endCall()
 
-        try {
-            discoveryListener?.let { nsdManager?.stopServiceDiscovery(it) }
-        } catch (_: Exception) {
-        }
-        try {
-            registrationListener?.let { nsdManager?.unregisterService(it) }
-        } catch (_: Exception) {
-        }
-        try {
-            serverSocket?.close()
-        } catch (_: Exception) {
-        }
-        try {
-            if (multicastLock?.isHeld == true) multicastLock?.release()
-        } catch (_: Exception) {
-        }
+        try { discoveryListener?.let { nsdManager?.stopServiceDiscovery(it) } } catch (_: Exception) {}
+        try { registrationListener?.let { nsdManager?.unregisterService(it) } } catch (_: Exception) {}
+        try { serverSocket?.close() } catch (_: Exception) {}
+        try { udpSocket?.close() } catch (_: Exception) {}
+        try { if (multicastLock?.isHeld == true) multicastLock?.release() } catch (_: Exception) {}
+
         serverSocket = null
+        udpSocket = null
         discoveryListener = null
         registrationListener = null
     }
@@ -137,19 +194,189 @@ class LanMessenger(
         scope.cancel()
     }
 
-    suspend fun sendMessage(peer: LanPeer, text: String): Boolean = withContext(Dispatchers.IO) {
+    // ==================== UDP BROADCAST DISCOVERY (РАБОТАЕТ НА ТОЧКЕ ДОСТУПА БЕЗ ИНЕТА) ====================
+
+    private fun buildBeaconBytes(port: Int): ByteArray {
+        return JSONObject()
+            .put("magic", "VOLT_LAN_V1")
+            .put("id", shortId)
+            .put("nick", myNickname)
+            .put("srv", myServerName)
+            .put("port", port)
+            .toString()
+            .toByteArray(Charsets.UTF_8)
+    }
+
+    private fun startUdpDiscovery(tcpPort: Int) {
+        // 1. Слушатель UDP-маячков
+        scope.launch {
+            try {
+                val ds = DatagramSocket(null).apply {
+                    reuseAddress = true
+                    broadcast = true
+                    bind(InetSocketAddress(udpPort))
+                }
+                udpSocket = ds
+                val buf = ByteArray(1024)
+                while (isActive && !ds.isClosed) {
+                    val packet = DatagramPacket(buf, buf.size)
+                    try {
+                        ds.receive(packet)
+                    } catch (_: Exception) {
+                        break
+                    }
+                    val raw = String(packet.data, 0, packet.length, Charsets.UTF_8)
+                    val host = packet.address?.hostAddress ?: continue
+                    try {
+                        val json = JSONObject(raw)
+                        if (json.optString("magic") != "VOLT_LAN_V1") continue
+                        val peerId = json.optString("id")
+                        if (peerId.isEmpty() || peerId == shortId) continue
+                        val nick = json.optString("nick", "Volt User")
+                        val srv = json.optString("srv", "Volt-Node")
+                        val port = json.optInt("port", 0)
+                        if (port !in 1..65535) continue
+
+                        val isNew = !peersMap.containsKey(peerId)
+                        peersMap[peerId] = LanPeer(peerId, nick, srv, host, port, System.currentTimeMillis())
+                        storage.saveKnownPeerName(peerId, nick, srv)
+                        publishPeers()
+
+                        // Если это новый собеседник — сразу отвечаем ему напрямую (unicast), чтобы точка доступа не потеряла обратный пакет
+                        if (isNew || json.optBoolean("needReply", false)) {
+                            val reply = JSONObject()
+                                .put("magic", "VOLT_LAN_V1")
+                                .put("id", shortId)
+                                .put("nick", myNickname)
+                                .put("srv", myServerName)
+                                .put("port", tcpPort)
+                                .put("needReply", false)
+                                .toString()
+                                .toByteArray(Charsets.UTF_8)
+                            try {
+                                ds.send(DatagramPacket(reply, reply.size, packet.address, udpPort))
+                            } catch (_: Exception) {
+                            }
+                        }
+                    } catch (_: Exception) {
+                    }
+                }
+            } catch (_: Exception) {
+            }
+        }
+
+        // 2. Периодическая рассылка маячков по ВСЕМ активным Wi-Fi / Hotspot интерфейсам
+        scope.launch {
+            while (isActive && isStarted) {
+                _localIp.value = detectLocalIpv4()
+                val data = JSONObject()
+                    .put("magic", "VOLT_LAN_V1")
+                    .put("id", shortId)
+                    .put("nick", myNickname)
+                    .put("srv", myServerName)
+                    .put("port", tcpPort)
+                    .put("needReply", true)
+                    .toString()
+                    .toByteArray(Charsets.UTF_8)
+
+                val targets = collectBroadcastAddresses()
+                val ds = udpSocket
+                if (ds != null && !ds.isClosed) {
+                    for (addr in targets) {
+                        try {
+                            ds.send(DatagramPacket(data, data.size, addr, udpPort))
+                        } catch (_: Exception) {
+                        }
+                    }
+                }
+
+                // Очистка пропавших пиров (таймаут 15 секунд)
+                val now = System.currentTimeMillis()
+                var changed = false
+                val it = peersMap.entries.iterator()
+                while (it.hasNext()) {
+                    val entry = it.next()
+                    if (entry.value.lastSeenMs != Long.MAX_VALUE && now - entry.value.lastSeenMs > 15_000L) {
+                        it.remove()
+                        changed = true
+                    }
+                }
+                if (changed) publishPeers()
+
+                delay(2200L)
+            }
+        }
+    }
+
+    private fun collectBroadcastAddresses(): Set<InetAddress> {
+        val result = linkedSetOf<InetAddress>()
+        try {
+            val ifaces = NetworkInterface.getNetworkInterfaces()
+            while (ifaces.hasMoreElements()) {
+                val ni = ifaces.nextElement()
+                if (!ni.isUp || ni.isLoopback) continue
+                for (ia in ni.interfaceAddresses) {
+                    val bcast = ia.broadcast
+                    if (bcast is Inet4Address) {
+                        result.add(bcast)
+                    }
+                }
+            }
+        } catch (_: Exception) {
+        }
+        try { result.add(InetAddress.getByName("255.255.255.255")) } catch (_: Exception) {}
+        try { result.add(InetAddress.getByName("192.168.43.255")) } catch (_: Exception) {}
+        return result
+    }
+
+    private fun detectLocalIpv4(): String {
+        try {
+            val ifaces = NetworkInterface.getNetworkInterfaces()
+            var fallback = "127.0.0.1"
+            while (ifaces.hasMoreElements()) {
+                val ni = ifaces.nextElement()
+                if (!ni.isUp || ni.isLoopback) continue
+                for (ia in ni.interfaceAddresses) {
+                    val addr = ia.address
+                    if (addr is Inet4Address && !addr.isLoopbackAddress) {
+                        val ip = addr.hostAddress ?: continue
+                        if (ip.startsWith("192.168.") || ip.startsWith("10.") || ip.startsWith("172.")) {
+                            return ip
+                        }
+                        fallback = ip
+                    }
+                }
+            }
+            return fallback
+        } catch (_: Exception) {
+            return "127.0.0.1"
+        }
+    }
+
+    private fun publishPeers() {
+        _peers.value = peersMap.values.sortedBy { it.nickname.lowercase() }
+    }
+
+    // ==================== ЗАШИФРОВАННАЯ ОТПРАВКА ТЕКСТА И ФАЙЛОВ ====================
+
+    suspend fun sendTextMessage(peer: LanPeer, text: String): Boolean = withContext(Dispatchers.IO) {
         return@withContext try {
             Socket().use { socket ->
-                socket.connect(InetSocketAddress(peer.host, peer.port), 2500)
-                val payload = JSONObject()
-                    .put("peerId", myDeviceId.take(6))
+                socket.tcpNoDelay = true
+                socket.connect(InetSocketAddress(peer.host, peer.port), 3000)
+                val inp = DataInputStream(BufferedInputStream(socket.getInputStream(), 65536))
+                val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 65536))
+                val ch = VoltCrypto.handshake(inp, out, isClient = true)
+
+                val header = JSONObject()
+                    .put("type", "text")
+                    .put("peerId", shortId)
                     .put("senderName", myNickname)
                     .put("serverName", myServerName)
                     .put("text", text)
-                    .put("timestamp", System.currentTimeMillis())
-                val writer = OutputStreamWriter(socket.getOutputStream(), Charsets.UTF_8)
-                writer.write(payload.toString() + "\n")
-                writer.flush()
+                    .put("ts", System.currentTimeMillis())
+                ch.writeFrame(header.toString().toByteArray(Charsets.UTF_8))
+                ch.flush()
             }
             true
         } catch (_: Exception) {
@@ -157,25 +384,424 @@ class LanMessenger(
         }
     }
 
-    private fun handleClient(client: Socket) {
-        try {
-            client.use { s ->
-                s.soTimeout = 3000
-                val reader = BufferedReader(InputStreamReader(s.getInputStream(), Charsets.UTF_8))
-                val line = reader.readLine() ?: return
-                val json = JSONObject(line)
-                val peerId = json.optString("peerId")
-                val senderName = json.optString("senderName", "Сосед по Wi-Fi")
-                val serverName = json.optString("serverName", "Volt-Node")
-                val text = json.optString("text")
-                val ts = json.optLong("timestamp", System.currentTimeMillis())
-                if (peerId.isNotEmpty() && text.isNotEmpty()) {
-                    onMessageReceived(IncomingLanMessage(peerId, senderName, serverName, text, ts))
-                }
+    suspend fun sendFileMessage(
+        peer: LanPeer,
+        caption: String,
+        attachment: AttachmentInfo,
+        onProgress: (progress: Float, speedMbps: Float) -> Unit
+    ): Boolean = withContext(Dispatchers.IO) {
+        return@withContext try {
+            val totalSize = when {
+                attachment.localPath.isNotEmpty() && File(attachment.localPath).exists() -> File(attachment.localPath).length()
+                attachment.sizeBytes > 0L -> attachment.sizeBytes
+                else -> 0L
             }
+
+            Socket().use { socket ->
+                socket.tcpNoDelay = true
+                socket.sendBufferSize = 512 * 1024
+                socket.connect(InetSocketAddress(peer.host, peer.port), 4000)
+
+                val inp = DataInputStream(BufferedInputStream(socket.getInputStream(), 65536))
+                val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 256 * 1024))
+                val ch = VoltCrypto.handshake(inp, out, isClient = true)
+
+                val header = JSONObject()
+                    .put("type", "file")
+                    .put("peerId", shortId)
+                    .put("senderName", myNickname)
+                    .put("serverName", myServerName)
+                    .put("text", caption)
+                    .put("fileName", attachment.name)
+                    .put("mimeType", attachment.mimeType)
+                    .put("fileSize", totalSize)
+                    .put("isVoice", attachment.isVoice)
+                    .put("durationSec", attachment.durationSec)
+                    .put("ts", System.currentTimeMillis())
+                ch.writeFrame(header.toString().toByteArray(Charsets.UTF_8))
+                ch.flush()
+
+                val stream = if (attachment.localPath.isNotEmpty() && File(attachment.localPath).exists()) {
+                    FileInputStream(attachment.localPath)
+                } else {
+                    val uri = Uri.parse(attachment.uriString ?: return@withContext false)
+                    context.contentResolver.openInputStream(uri) ?: return@withContext false
+                }
+
+                stream.use { fileIn ->
+                    val buffer = ByteArray(256 * 1024) // 256 КБ чанк -> высокая скорость, минимум RAM
+                    var sent = 0L
+                    val startMs = System.currentTimeMillis()
+                    var lastReportMs = 0L
+
+                    while (true) {
+                        val read = fileIn.read(buffer)
+                        if (read <= 0) break
+                        ch.writeFrame(buffer, read)
+                        sent += read
+
+                        val now = System.currentTimeMillis()
+                        if (now - lastReportMs >= 120L) {
+                            val elapsedSec = ((now - startMs).coerceAtLeast(1L)) / 1000f
+                            val mbps = (sent / (1024f * 1024f)) / elapsedSec
+                            val frac = if (totalSize > 0L) (sent.toFloat() / totalSize.toFloat()).coerceIn(0f, 0.99f) else 0.5f
+                            onProgress(frac, mbps)
+                            lastReportMs = now
+                        }
+                    }
+                    // Финальный пустой маркер EOF (1 байт = 0)
+                    ch.writeFrame(ByteArray(0), 0)
+                    ch.flush()
+                }
+                onProgress(1f, 0f)
+            }
+            true
+        } catch (_: Exception) {
+            false
+        }
+    }
+
+    // ==================== ЗАШИФРОВАННЫЕ АУДИОЗВОНКИ ПО ЛОКАЛЬНОЙ СЕТИ ====================
+
+    fun startCall(peer: LanPeer) {
+        if (_callState.value.status != CallStatus.IDLE) return
+        _callState.value = LanCallState(
+            status = CallStatus.OUTGOING,
+            peerId = peer.id,
+            peerName = peer.nickname
+        )
+
+        scope.launch {
+            try {
+                val socket = Socket()
+                socket.tcpNoDelay = true
+                socket.connect(InetSocketAddress(peer.host, peer.port), 4000)
+                activeCallSocket = socket
+
+                val inp = DataInputStream(BufferedInputStream(socket.getInputStream(), 32768))
+                val out = DataOutputStream(BufferedOutputStream(socket.getOutputStream(), 32768))
+                val ch = VoltCrypto.handshake(inp, out, isClient = true)
+
+                val req = JSONObject()
+                    .put("type", "call_audio")
+                    .put("peerId", shortId)
+                    .put("senderName", myNickname)
+                    .put("serverName", myServerName)
+                ch.writeFrame(req.toString().toByteArray(Charsets.UTF_8))
+                ch.flush()
+
+                _callState.value = _callState.value.copy(sessionEmojis = ch.sessionEmojis)
+
+                // Ждём ответ от собеседника ("accept" или "reject")
+                val respJson = JSONObject(String(ch.readFrame(), Charsets.UTF_8))
+                if (respJson.optString("status") != "accept") {
+                    endCall()
+                    return@launch
+                }
+
+                _callState.value = _callState.value.copy(
+                    status = CallStatus.CONNECTED,
+                    connectedAtMs = System.currentTimeMillis()
+                )
+                runFullDuplexAudioCall(socket, ch)
+            } catch (_: Exception) {
+                endCall()
+            }
+        }
+    }
+
+    fun acceptIncomingCall() {
+        incomingCallDecision?.complete(true)
+    }
+
+    fun declineIncomingCall() {
+        incomingCallDecision?.complete(false)
+        endCall()
+    }
+
+    fun toggleMute() {
+        _callState.value = _callState.value.copy(isMuted = !_callState.value.isMuted)
+    }
+
+    fun toggleSpeaker() {
+        val next = !_callState.value.isSpeaker
+        _callState.value = _callState.value.copy(isSpeaker = next)
+        try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            am?.mode = AudioManager.MODE_IN_COMMUNICATION
+            @Suppress("DEPRECATION")
+            am?.isSpeakerphoneOn = next
         } catch (_: Exception) {
         }
     }
+
+    fun endCall() {
+        incomingCallDecision?.complete(false)
+        incomingCallDecision = null
+        try { activeCallSocket?.close() } catch (_: Exception) {}
+        activeCallSocket = null
+        try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            am?.mode = AudioManager.MODE_NORMAL
+            @Suppress("DEPRECATION")
+            am?.isSpeakerphoneOn = false
+        } catch (_: Exception) {
+        }
+        _callState.value = LanCallState()
+    }
+
+    @SuppressLint("MissingPermission")
+    private suspend fun runFullDuplexAudioCall(socket: Socket, ch: EncryptedChannel) {
+        val sampleRate = 16000
+        val minRec = AudioRecord.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_IN_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(2560)
+        val minPlay = AudioTrack.getMinBufferSize(sampleRate, AudioFormat.CHANNEL_OUT_MONO, AudioFormat.ENCODING_PCM_16BIT).coerceAtLeast(2560)
+
+        var recorder: AudioRecord? = null
+        var track: AudioTrack? = null
+
+        try {
+            val am = context.getSystemService(Context.AUDIO_SERVICE) as? AudioManager
+            am?.mode = AudioManager.MODE_IN_COMMUNICATION
+
+            recorder = AudioRecord(
+                MediaRecorder.AudioSource.VOICE_COMMUNICATION,
+                sampleRate,
+                AudioFormat.CHANNEL_IN_MONO,
+                AudioFormat.ENCODING_PCM_16BIT,
+                minRec * 2
+            )
+            track = AudioTrack.Builder()
+                .setAudioAttributes(
+                    AudioAttributes.Builder()
+                        .setUsage(AudioAttributes.USAGE_VOICE_COMMUNICATION)
+                        .setContentType(AudioAttributes.CONTENT_TYPE_SPEECH)
+                        .build()
+                )
+                .setAudioFormat(
+                    AudioFormat.Builder()
+                        .setEncoding(AudioFormat.ENCODING_PCM_16BIT)
+                        .setSampleRate(sampleRate)
+                        .setChannelMask(AudioFormat.CHANNEL_OUT_MONO)
+                        .build()
+                )
+                .setBufferSizeInBytes(minPlay * 2)
+                .setTransferMode(AudioTrack.MODE_STREAM)
+                .build()
+
+            recorder.startRecording()
+            track.play()
+
+            val sendJob = scope.launch {
+                val pcm = ByteArray(1280) // 40мс чанк
+                val silence = ByteArray(1280)
+                while (!socket.isClosed && _callState.value.status == CallStatus.CONNECTED) {
+                    val read = recorder.read(pcm, 0, pcm.size)
+                    if (read > 0) {
+                        val toSend = if (_callState.value.isMuted) silence else pcm
+                        try {
+                            ch.writeFrame(toSend, read)
+                            ch.flush()
+                        } catch (_: Exception) {
+                            break
+                        }
+                    }
+                }
+            }
+
+            while (!socket.isClosed && _callState.value.status == CallStatus.CONNECTED) {
+                val frame = try {
+                    ch.readFrame(maxSize = 65536)
+                } catch (_: Exception) {
+                    break
+                }
+                if (frame.isNotEmpty()) {
+                    track.write(frame, 0, frame.size)
+                }
+            }
+            sendJob.cancel()
+        } catch (_: Exception) {
+        } finally {
+            try { recorder?.stop() } catch (_: Exception) {}
+            try { recorder?.release() } catch (_: Exception) {}
+            try { track?.stop() } catch (_: Exception) {}
+            try { track?.release() } catch (_: Exception) {}
+            endCall()
+        }
+    }
+
+    // ==================== ВХОДЯЩИЕ TCP СОЕДИНЕНИЯ ====================
+
+    private suspend fun handleIncomingTcp(client: Socket) {
+        try {
+            client.tcpNoDelay = true
+            client.receiveBufferSize = 512 * 1024
+            val inp = DataInputStream(BufferedInputStream(client.getInputStream(), 256 * 1024))
+            val out = DataOutputStream(BufferedOutputStream(client.getOutputStream(), 65536))
+            val ch = VoltCrypto.handshake(inp, out, isClient = false)
+
+            val headerJson = JSONObject(String(ch.readFrame(), Charsets.UTF_8))
+            val type = headerJson.optString("type")
+            val peerId = headerJson.optString("peerId")
+            val senderName = headerJson.optString("senderName", "Собеседник")
+            val serverName = headerJson.optString("serverName", "Volt-Node")
+            val ts = headerJson.optLong("ts", System.currentTimeMillis())
+
+            if (peerId.isNotEmpty()) {
+                storage.saveKnownPeerName(peerId, senderName, serverName)
+            }
+
+            when (type) {
+                "text" -> {
+                    val text = headerJson.optString("text")
+                    if (peerId.isNotEmpty() && text.isNotEmpty()) {
+                        onEvent(
+                            IncomingLanEvent(
+                                messageId = UUID.randomUUID().toString(),
+                                peerId = peerId,
+                                senderName = senderName,
+                                serverName = serverName,
+                                text = text,
+                                timestamp = ts
+                            )
+                        )
+                    }
+                    client.close()
+                }
+
+                "file" -> {
+                    val msgId = UUID.randomUUID().toString()
+                    val caption = headerJson.optString("text", "")
+                    val fileName = headerJson.optString("fileName", "file.bin")
+                    val mimeType = headerJson.optString("mimeType", "application/octet-stream")
+                    val expectedSize = headerJson.optLong("fileSize", 0L)
+                    val isVoice = headerJson.optBoolean("isVoice", false)
+                    val durationSec = headerJson.optInt("durationSec", 0)
+
+                    val outFile = storage.createIncomingFile(fileName)
+                    val baseAttachment = AttachmentInfo(
+                        name = fileName,
+                        localPath = outFile.absolutePath,
+                        mimeType = mimeType,
+                        sizeBytes = expectedSize,
+                        isVoice = isVoice,
+                        durationSec = durationSec
+                    )
+
+                    onEvent(
+                        IncomingLanEvent(
+                            messageId = msgId,
+                            peerId = peerId,
+                            senderName = senderName,
+                            serverName = serverName,
+                            text = caption,
+                            timestamp = ts,
+                            attachment = baseAttachment,
+                            progress = 0f,
+                            speedMbps = 0f
+                        )
+                    )
+
+                    var received = 0L
+                    val startMs = System.currentTimeMillis()
+                    var lastReportMs = 0L
+
+                    FileOutputStream(outFile).use { fos ->
+                        while (true) {
+                            val chunk = ch.readFrame(maxSize = 2 * 1024 * 1024)
+                            if (chunk.isEmpty()) break // EOF
+                            fos.write(chunk)
+                            received += chunk.size
+
+                            val now = System.currentTimeMillis()
+                            if (now - lastReportMs >= 140L) {
+                                val elapsedSec = ((now - startMs).coerceAtLeast(1L)) / 1000f
+                                val mbps = (received / (1024f * 1024f)) / elapsedSec
+                                val frac = if (expectedSize > 0L) (received.toFloat() / expectedSize.toFloat()).coerceIn(0f, 0.99f) else 0.5f
+                                onEvent(
+                                    IncomingLanEvent(
+                                        messageId = msgId,
+                                        peerId = peerId,
+                                        senderName = senderName,
+                                        serverName = serverName,
+                                        text = caption,
+                                        timestamp = ts,
+                                        attachment = baseAttachment.copy(sizeBytes = maxOf(expectedSize, received)),
+                                        progress = frac,
+                                        speedMbps = mbps
+                                    )
+                                )
+                                lastReportMs = now
+                            }
+                        }
+                    }
+
+                    // Сохраняем принятый не-голосовой файл в Загрузки/VoltMessenger
+                    if (!isVoice) {
+                        storage.exportToPublicDownloads(outFile, fileName, mimeType)
+                    }
+
+                    onEvent(
+                        IncomingLanEvent(
+                            messageId = msgId,
+                            peerId = peerId,
+                            senderName = senderName,
+                            serverName = serverName,
+                            text = caption,
+                            timestamp = ts,
+                            attachment = baseAttachment.copy(sizeBytes = outFile.length()),
+                            progress = null,
+                            speedMbps = null
+                        )
+                    )
+                    client.close()
+                }
+
+                "call_audio" -> {
+                    if (_callState.value.status != CallStatus.IDLE) {
+                        ch.writeFrame(JSONObject().put("status", "busy").toString().toByteArray(Charsets.UTF_8))
+                        ch.flush()
+                        client.close()
+                        return
+                    }
+                    activeCallSocket = client
+                    val decision = CompletableDeferred<Boolean>()
+                    incomingCallDecision = decision
+
+                    _callState.value = LanCallState(
+                        status = CallStatus.INCOMING,
+                        peerId = peerId,
+                        peerName = senderName,
+                        sessionEmojis = ch.sessionEmojis
+                    )
+
+                    val accepted = decision.await()
+                    if (!accepted) {
+                        try {
+                            ch.writeFrame(JSONObject().put("status", "reject").toString().toByteArray(Charsets.UTF_8))
+                            ch.flush()
+                        } catch (_: Exception) {}
+                        endCall()
+                        return
+                    }
+
+                    ch.writeFrame(JSONObject().put("status", "accept").toString().toByteArray(Charsets.UTF_8))
+                    ch.flush()
+
+                    _callState.value = _callState.value.copy(
+                        status = CallStatus.CONNECTED,
+                        connectedAtMs = System.currentTimeMillis()
+                    )
+                    runFullDuplexAudioCall(client, ch)
+                }
+
+                else -> client.close()
+            }
+        } catch (_: Exception) {
+            try { client.close() } catch (_: Exception) {}
+        }
+    }
+
+    // ==================== NSD (mDNS) ДОПОЛНИТЕЛЬНО К UDP ====================
 
     private fun sanitizePart(raw: String, fallback: String): String {
         return raw.replace("--", "-")
@@ -186,91 +812,59 @@ class LanMessenger(
     }
 
     private fun registerNsdService(port: Int) {
-        val cleanServer = sanitizePart(myServerName, "VoltNode")
-        val cleanNick = sanitizePart(myNickname, "User")
         val info = NsdServiceInfo().apply {
-            serviceName = "VM_${myDeviceId.take(6)}_${cleanServer}--${cleanNick}"
+            serviceName = "VM_${shortId}_${sanitizePart(myServerName, "VoltNode")}--${sanitizePart(myNickname, "User")}"
             serviceType = this@LanMessenger.serviceType
             setPort(port)
         }
         val listener = object : NsdManager.RegistrationListener {
-            override fun onServiceRegistered(nsdServiceInfo: NsdServiceInfo) {
-                registeredName = nsdServiceInfo.serviceName
-            }
+            override fun onServiceRegistered(nsdServiceInfo: NsdServiceInfo) { registeredName = nsdServiceInfo.serviceName }
             override fun onRegistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
             override fun onServiceUnregistered(arg0: NsdServiceInfo) {}
             override fun onUnregistrationFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
         }
         registrationListener = listener
-        try {
-            nsdManager?.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener)
-        } catch (_: Exception) {
-        }
+        try { nsdManager?.registerService(info, NsdManager.PROTOCOL_DNS_SD, listener) } catch (_: Exception) {}
     }
 
-    private fun startDiscovery() {
+    private fun startNsdDiscovery() {
         val listener = object : NsdManager.DiscoveryListener {
             override fun onDiscoveryStarted(regType: String) {}
-
             override fun onServiceFound(service: NsdServiceInfo) {
                 if (!service.serviceType.startsWith("_voltmessenger")) return
                 if (service.serviceName == registeredName) return
-                if (service.serviceName.startsWith("VM_${myDeviceId.take(6)}_")) return
-                resolvePeer(service)
+                if (service.serviceName.startsWith("VM_${shortId}_")) return
+                resolveNsdPeer(service)
             }
-
-            override fun onServiceLost(service: NsdServiceInfo) {
-                val id = parsePeerMeta(service.serviceName)?.first ?: return
-                peersMap.remove(id)
-                _peers.value = peersMap.values.toList()
-            }
-
+            override fun onServiceLost(service: NsdServiceInfo) {}
             override fun onDiscoveryStopped(serviceType: String) {}
             override fun onStartDiscoveryFailed(serviceType: String, errorCode: Int) {}
             override fun onStopDiscoveryFailed(serviceType: String, errorCode: Int) {}
         }
         discoveryListener = listener
-        try {
-            nsdManager?.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener)
-        } catch (_: Exception) {
-        }
+        try { nsdManager?.discoverServices(serviceType, NsdManager.PROTOCOL_DNS_SD, listener) } catch (_: Exception) {}
     }
 
     @Suppress("DEPRECATION")
-    private fun resolvePeer(service: NsdServiceInfo) {
+    private fun resolveNsdPeer(service: NsdServiceInfo) {
         try {
             nsdManager?.resolveService(service, object : NsdManager.ResolveListener {
                 override fun onResolveFailed(serviceInfo: NsdServiceInfo, errorCode: Int) {}
                 override fun onServiceResolved(serviceInfo: NsdServiceInfo) {
                     val host = serviceInfo.host?.hostAddress ?: return
                     val port = serviceInfo.port
-                    val meta = parsePeerMeta(serviceInfo.serviceName)
-                    val peerId = meta?.first ?: serviceInfo.serviceName
-                    val serverName = meta?.second ?: "Volt-Node"
-                    val nick = meta?.third ?: serviceInfo.serviceName
-                    if (peerId == myDeviceId.take(6)) return
-                    peersMap[peerId] = LanPeer(
-                        id = peerId,
-                        nickname = nick,
-                        serverName = serverName,
-                        host = host,
-                        port = port
-                    )
-                    _peers.value = peersMap.values.toList()
+                    val parts = serviceInfo.serviceName.split("_", limit = 3)
+                    if (parts.size < 3 || parts[0] != "VM") return
+                    val peerId = parts[1]
+                    if (peerId == shortId) return
+                    val tail = parts[2].split("--", limit = 2)
+                    val srv = tail.getOrNull(0)?.ifBlank { "Volt-Node" } ?: "Volt-Node"
+                    val nick = tail.getOrNull(1)?.ifBlank { srv } ?: srv
+                    peersMap[peerId] = LanPeer(peerId, nick, srv, host, port, System.currentTimeMillis())
+                    storage.saveKnownPeerName(peerId, nick, srv)
+                    publishPeers()
                 }
             })
-        } catch (_: Exception) {
-        }
-    }
-
-    // Возвращает Triple(peerId, serverName, nickname)
-    private fun parsePeerMeta(serviceName: String): Triple<String, String, String>? {
-        val parts = serviceName.split("_", limit = 3)
-        if (parts.size < 3 || parts[0] != "VM") return null
-        val id = parts[1]
-        val tail = parts[2].split("--", limit = 2)
-        val server = tail.getOrNull(0)?.ifBlank { "Volt-Node" } ?: "Volt-Node"
-        val nick = tail.getOrNull(1)?.ifBlank { server } ?: server
-        return Triple(id, server, nick)
+        } catch (_: Exception) {}
     }
 }
