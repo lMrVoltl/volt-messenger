@@ -13,6 +13,7 @@ import com.voltage.messenger.model.AttachmentInfo
 import com.voltage.messenger.model.ChannelMeta
 import com.voltage.messenger.model.ChatMessage
 import com.voltage.messenger.model.DEFAULT_AI_SYSTEM_PROMPT
+import com.voltage.messenger.model.DEFAULT_RELAY_URL
 import com.voltage.messenger.model.PollData
 import com.voltage.messenger.model.ReplyPreview
 import kotlinx.coroutines.Dispatchers
@@ -61,6 +62,9 @@ class ChatStorage(private val context: Context) {
         if (clean.isNotEmpty()) prefs.edit().putString("server_name", clean).apply()
     }
 
+    fun getLastRoomSyncMs(): Long = prefs.getLong("last_room_sync_ms", 0L)
+    fun setLastRoomSyncMs(ts: Long) { prefs.edit().putLong("last_room_sync_ms", ts).apply() }
+
     fun loadThemeConfig(): AppThemeConfig {
         return AppThemeConfig(
             themeMode = prefs.getInt("theme_mode", 0),
@@ -69,8 +73,8 @@ class ChatStorage(private val context: Context) {
             wallpaperStyle = prefs.getInt("wallpaper_style", 1),
             aiSystemPrompt = prefs.getString("ai_system_prompt", DEFAULT_AI_SYSTEM_PROMPT) ?: DEFAULT_AI_SYSTEM_PROMPT,
             aiControlEnabled = prefs.getBoolean("ai_control_enabled", true),
-            relayEnabled = prefs.getBoolean("relay_enabled", false),
-            relayUrl = prefs.getString("relay_url", "") ?: ""
+            relayEnabled = prefs.getBoolean("relay_v2_enabled", true),
+            relayUrl = prefs.getString("relay_v2_url", DEFAULT_RELAY_URL)?.ifBlank { DEFAULT_RELAY_URL } ?: DEFAULT_RELAY_URL
         )
     }
 
@@ -82,8 +86,8 @@ class ChatStorage(private val context: Context) {
             .putInt("wallpaper_style", cfg.wallpaperStyle)
             .putString("ai_system_prompt", cfg.aiSystemPrompt)
             .putBoolean("ai_control_enabled", cfg.aiControlEnabled)
-            .putBoolean("relay_enabled", cfg.relayEnabled)
-            .putString("relay_url", cfg.relayUrl)
+            .putBoolean("relay_v2_enabled", cfg.relayEnabled)
+            .putString("relay_v2_url", cfg.relayUrl.ifBlank { DEFAULT_RELAY_URL })
             .apply()
     }
 
@@ -185,10 +189,7 @@ class ChatStorage(private val context: Context) {
         try {
             val root = JSONObject(groupsFile.readText())
             val keys = root.keys()
-            while (keys.hasNext()) {
-                val id = keys.next()
-                result[id] = root.optString(id, "Локальная группа")
-            }
+            while (keys.hasNext()) { val id = keys.next(); result[id] = root.optString(id, "Группа") }
         } catch (_: Exception) {}
         return result
     }
@@ -219,10 +220,8 @@ class ChatStorage(private val context: Context) {
     fun savePins(pinnedChats: Set<String>, pinnedMessages: Map<String, String>) {
         try {
             val root = JSONObject()
-            val chatsArr = JSONArray().apply { pinnedChats.forEach { put(it) } }
-            val msgsObj = JSONObject().apply { pinnedMessages.forEach { (k, v) -> put(k, v) } }
-            root.put("chats", chatsArr)
-            root.put("messages", msgsObj)
+            root.put("chats", JSONArray().apply { pinnedChats.forEach { put(it) } })
+            root.put("messages", JSONObject().apply { pinnedMessages.forEach { (k, v) -> put(k, v) } })
             pinsFile.writeText(root.toString())
         } catch (_: Exception) {}
     }
@@ -281,21 +280,12 @@ class ChatStorage(private val context: Context) {
                     val ts = o.optLong("timestamp", System.currentTimeMillis())
                     list.add(
                         ChatMessage(
-                            id = o.optString("id"),
-                            chatId = chatId,
-                            senderName = o.optString("senderName"),
-                            text = o.optString("text"),
-                            isFromMe = o.optBoolean("isFromMe"),
-                            timestamp = ts,
-                            timeLabel = ChatMessage.formatTime(ts),
-                            isRead = o.optBoolean("isRead", true),
-                            isMediaDemo = o.optBoolean("isMediaDemo", false),
-                            replyTo = reply,
-                            attachment = att,
-                            poll = poll,
-                            isEncrypted = o.optBoolean("isEncrypted", false),
-                            reactions = reactionsMap,
-                            myReactions = myReactionsSet
+                            id = o.optString("id"), chatId = chatId, senderName = o.optString("senderName"),
+                            text = o.optString("text"), isFromMe = o.optBoolean("isFromMe"), timestamp = ts,
+                            timeLabel = ChatMessage.formatTime(ts), isRead = o.optBoolean("isRead", true),
+                            isMediaDemo = o.optBoolean("isMediaDemo", false), replyTo = reply, attachment = att,
+                            poll = poll, isEncrypted = o.optBoolean("isEncrypted", false),
+                            reactions = reactionsMap, myReactions = myReactionsSet
                         )
                     )
                 }
@@ -312,34 +302,18 @@ class ChatStorage(private val context: Context) {
                 val arr = JSONArray()
                 list.takeLast(150).forEach { msg ->
                     val o = JSONObject()
-                        .put("id", msg.id)
-                        .put("senderName", msg.senderName)
-                        .put("text", msg.text)
-                        .put("isFromMe", msg.isFromMe)
-                        .put("timestamp", msg.timestamp)
-                        .put("isRead", msg.isRead)
-                        .put("isMediaDemo", msg.isMediaDemo)
-                        .put("isEncrypted", msg.isEncrypted)
+                        .put("id", msg.id).put("senderName", msg.senderName).put("text", msg.text)
+                        .put("isFromMe", msg.isFromMe).put("timestamp", msg.timestamp).put("isRead", msg.isRead)
+                        .put("isMediaDemo", msg.isMediaDemo).put("isEncrypted", msg.isEncrypted)
                     msg.replyTo?.let { o.put("replyTo", JSONObject().put("senderName", it.senderName).put("text", it.text)) }
                     msg.attachment?.let {
                         o.put("attachment", JSONObject().put("name", it.name).put("localPath", it.localPath).put("mimeType", it.mimeType).put("sizeBytes", it.sizeBytes).put("isVoice", it.isVoice).put("durationSec", it.durationSec))
                     }
                     msg.poll?.let { p ->
-                        val pObj = JSONObject()
-                            .put("question", p.question)
-                            .put("options", JSONArray().apply { p.options.forEach { put(it) } })
-                            .put("votes", JSONObject().apply { p.votes.forEach { (k, v) -> if (v > 0) put(k.toString(), v) } })
-                            .put("myVotes", JSONArray().apply { p.myVotes.forEach { put(it) } })
-                            .put("isAnonymous", p.isAnonymous)
-                            .put("allowsMultiple", p.allowsMultiple)
-                        o.put("poll", pObj)
+                        o.put("poll", JSONObject().put("question", p.question).put("options", JSONArray().apply { p.options.forEach { put(it) } }).put("votes", JSONObject().apply { p.votes.forEach { (k, v) -> if (v > 0) put(k.toString(), v) } }).put("myVotes", JSONArray().apply { p.myVotes.forEach { put(it) } }).put("isAnonymous", p.isAnonymous).put("allowsMultiple", p.allowsMultiple))
                     }
-                    if (msg.reactions.isNotEmpty()) {
-                        o.put("reactions", JSONObject().apply { msg.reactions.forEach { (e, c) -> if (c > 0) put(e, c) } })
-                    }
-                    if (msg.myReactions.isNotEmpty()) {
-                        o.put("myReactions", JSONArray().apply { msg.myReactions.forEach { put(it) } })
-                    }
+                    if (msg.reactions.isNotEmpty()) o.put("reactions", JSONObject().apply { msg.reactions.forEach { (e, c) -> if (c > 0) put(e, c) } })
+                    if (msg.myReactions.isNotEmpty()) o.put("myReactions", JSONArray().apply { msg.myReactions.forEach { put(it) } })
                     arr.put(o)
                 }
                 root.put(chatId, arr)

@@ -46,6 +46,6 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           tag_name: build-${{ github.run_number }}
-          name: Volt Messenger v0.7.${{ github.run_number }}
-          body: Автоматическая сборка Volt Messenger (build ${{ github.run_number }})
+          name: Volt Messenger v0.8.${{ github.run_number }}
+          body: Гибридный режим (Cloudflare Relay + локальный P2P) — build ${{ github.run_number }}
           files: app/build/outputs/apk/release/app-release.apk

@@ -9,6 +9,8 @@ import java.util.UUID
 const val DEFAULT_AI_SYSTEM_PROMPT =
     "Ты — Volt AI, локальный ассистент Volt Messenger. Не называй себя ChatGPT. Отвечай кратко на русском."
 
+const val DEFAULT_RELAY_URL = "wss://volt-relay.mrvolt.workers.dev/ws"
+
 enum class ChatType {
     SAVED,
     AI,
@@ -19,7 +21,7 @@ enum class ChatType {
 
 enum class ChatFolder(val title: String) {
     ALL("Все"),
-    LOCAL("Локальные"),
+    LOCAL("Личные"),
     GROUPS("Группы"),
     CHANNELS("Каналы"),
     AI("ИИ")
@@ -33,8 +35,8 @@ data class AppThemeConfig(
     val wallpaperStyle: Int = 1,
     val aiSystemPrompt: String = DEFAULT_AI_SYSTEM_PROMPT,
     val aiControlEnabled: Boolean = true,
-    val relayEnabled: Boolean = false,
-    val relayUrl: String = ""
+    val relayEnabled: Boolean = true,
+    val relayUrl: String = DEFAULT_RELAY_URL
 )
 
 @Immutable
@@ -134,6 +136,7 @@ data class ChatRoom(
     val subtitle: String,
     val type: ChatType,
     val isOnline: Boolean = false,
+    val isCloudOnline: Boolean = false,
     val isPinned: Boolean = false,
     val unreadCount: Int = 0,
     val avatarColorIndex: Int = 0,
@@ -151,6 +154,13 @@ data class LanPeer(
     val host: String,
     val port: Int,
     val lastSeenMs: Long = System.currentTimeMillis()
+)
+
+@Immutable
+data class RelayPeer(
+    val id: String,
+    val nickname: String,
+    val serverName: String
 )
 
 enum class CallStatus {
