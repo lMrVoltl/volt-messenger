@@ -11,7 +11,6 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.OkHttpClient
 import okhttp3.Request
-import org.json.JSONObject
 import java.io.File
 import java.io.FileOutputStream
 import java.util.concurrent.TimeUnit
@@ -25,53 +24,46 @@ data class ReleaseInfo(
 )
 
 object UpdateManager {
-    private const val REPO_API = "https://api.github.com/repos/lMrVoltl/volt-messenger/releases/latest"
+    private const val REPO_BASE = "https://github.com/lMrVoltl/volt-messenger"
 
-    private val client = OkHttpClient.Builder()
+    private val noRedirectClient = OkHttpClient.Builder()
         .connectTimeout(10, TimeUnit.SECONDS)
-        .readTimeout(60, TimeUnit.SECONDS)
+        .readTimeout(15, TimeUnit.SECONDS)
+        .followRedirects(false)
+        .followSslRedirects(false)
+        .build()
+
+    private val downloadClient = OkHttpClient.Builder()
+        .connectTimeout(15, TimeUnit.SECONDS)
+        .readTimeout(90, TimeUnit.SECONDS)
+        .followRedirects(true)
+        .followSslRedirects(true)
         .build()
 
     suspend fun checkLatestRelease(): Result<ReleaseInfo> = withContext(Dispatchers.IO) {
         runCatching {
             val req = Request.Builder()
-                .url(REPO_API)
-                .header("Accept", "application/vnd.github+json")
-                .header("User-Agent", "VoltMessenger/${BuildConfig.VERSION_NAME}")
+                .url("$REPO_BASE/releases/latest")
+                .header("User-Agent", "Mozilla/5.0 (Android) VoltMessenger/${BuildConfig.VERSION_NAME}")
                 .build()
 
-            client.newCall(req).execute().use { resp ->
-                if (!resp.isSuccessful) {
-                    error("GitHub ответил HTTP ${resp.code}. Убедись, что репозиторий открыт и есть релиз.")
+            noRedirectClient.newCall(req).execute().use { resp ->
+                val location = resp.header("Location").orEmpty()
+                if (location.isBlank() || !location.contains("/releases/tag/")) {
+                    error("Не удалось получить последний релиз (HTTP ${resp.code}).")
                 }
-                val body = resp.body?.string() ?: error("Пустой ответ GitHub")
-                val json = JSONObject(body)
-                val tag = json.optString("tag_name")
+                val tag = location.substringAfterLast("/").trim()
                 val buildNum = tag.removePrefix("build-").toIntOrNull()
                     ?: Regex("\\d+").findAll(tag).lastOrNull()?.value?.toIntOrNull()
                     ?: 0
-                val name = json.optString("name", tag)
-                val notes = json.optString("body", "")
+                if (buildNum <= 0) error("Некорректный тег релиза: $tag")
 
-                val assets = json.optJSONArray("assets")
-                var apkUrl = ""
-                if (assets != null) {
-                    for (i in 0 until assets.length()) {
-                        val a = assets.getJSONObject(i)
-                        val assetName = a.optString("name")
-                        if (assetName.endsWith(".apk", ignoreCase = true)) {
-                            apkUrl = a.optString("browser_download_url")
-                            break
-                        }
-                    }
-                }
-                if (apkUrl.isEmpty()) error("В релизе не найден APK-файл")
-
+                val apkUrl = "$REPO_BASE/releases/download/$tag/app-release.apk"
                 ReleaseInfo(
                     buildNumber = buildNum,
-                    versionName = name,
+                    versionName = "Volt Messenger (build $buildNum)",
                     downloadUrl = apkUrl,
-                    notes = notes,
+                    notes = "Релиз $tag",
                     isNewer = buildNum > BuildConfig.VERSION_CODE
                 )
             }
@@ -86,13 +78,13 @@ object UpdateManager {
         runCatching {
             val req = Request.Builder()
                 .url(downloadUrl)
-                .header("User-Agent", "VoltMessenger/${BuildConfig.VERSION_NAME}")
+                .header("User-Agent", "Mozilla/5.0 (Android) VoltMessenger/${BuildConfig.VERSION_NAME}")
                 .build()
 
             val outFile = File(context.cacheDir, "volt_update.apk")
             if (outFile.exists()) outFile.delete()
 
-            client.newCall(req).execute().use { resp ->
+            downloadClient.newCall(req).execute().use { resp ->
                 if (!resp.isSuccessful) error("Ошибка скачивания: HTTP ${resp.code}")
                 val body = resp.body ?: error("Пустой поток загрузки")
                 val total = body.contentLength()
